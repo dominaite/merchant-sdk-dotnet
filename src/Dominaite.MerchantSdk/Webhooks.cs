@@ -59,11 +59,13 @@ public static class Webhooks
         ArgumentNullException.ThrowIfNull(payload);
         ArgumentNullException.ThrowIfNull(secret);
 
-        var (timestamp, mac) = ParseSignatureHeader(signatureHeader);
+        var (rawTimestamp, timestamp, mac) = ParseSignatureHeader(signatureHeader);
 
-        // The signed message is "{t}.{raw_body}" - the timestamp, a dot, then the body bytes
-        // untouched.
-        var prefix = Encoding.UTF8.GetBytes(timestamp.ToString(CultureInfo.InvariantCulture) + ".");
+        // The signed message is "{t}.{raw_body}" - the timestamp EXACTLY as it appeared in the
+        // header, a dot, then the body bytes untouched. Never a parsed-and-reformatted number:
+        // the wire contract's header grammar pins the raw substring so every SDK accepts and
+        // rejects the same bytes.
+        var prefix = Encoding.UTF8.GetBytes(rawTimestamp + ".");
         var signed = new byte[prefix.Length + payload.Length];
         prefix.CopyTo(signed, 0);
         payload.CopyTo(signed, prefix.Length);
@@ -142,21 +144,26 @@ public static class Webhooks
     }
 
     /// <summary>
-    /// Splits <c>t={unix_seconds},v1={hex}</c> into its parts.
+    /// Splits <c>t={unix_seconds},v1={hex}</c> into its parts, enforcing the wire contract's
+    /// header grammar (WEBHOOKS-CONTRACT.md, normative 2026-08-21).
     /// </summary>
     /// <remarks>
     /// Fields are matched by name rather than by position, so a future scheme that appends
     /// another field (or reorders these two) still verifies. An unknown field is ignored; a
-    /// missing or repeated <c>t</c>/<c>v1</c> is not.
+    /// missing or repeated <c>t</c>/<c>v1</c> is not. The grammar is strict on purpose: no
+    /// whitespace anywhere, <c>t</c> is raw ASCII digits (kept verbatim for the MAC input),
+    /// <c>v1</c> is exactly 64 LOWERCASE hex characters - the platform never emits anything
+    /// wider, and a wider accept set only helps forgers probe.
     /// </remarks>
-    private static (long Timestamp, byte[] Mac) ParseSignatureHeader(string header)
+    private static (string RawTimestamp, long Timestamp, byte[] Mac) ParseSignatureHeader(string header)
     {
-        if (string.IsNullOrWhiteSpace(header))
+        if (string.IsNullOrEmpty(header))
         {
             throw Malformed("the signature header is empty");
         }
 
-        long? timestamp = null;
+        string? rawTimestamp = null;
+        long timestamp = 0;
         byte[]? mac = null;
 
         foreach (var field in header.Split(','))
@@ -167,23 +174,24 @@ public static class Webhooks
                 throw Malformed($"field \"{Truncate(field)}\" is not name=value");
             }
 
-            var name = field[..separator].Trim();
-            var value = field[(separator + 1)..].Trim();
+            var name = field[..separator];
+            var value = field[(separator + 1)..];
 
             switch (name)
             {
                 case "t":
-                    if (timestamp.HasValue)
+                    if (rawTimestamp is not null)
                     {
                         throw Malformed("repeated t field");
                     }
 
-                    if (!long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed))
+                    if (value.Length == 0 || !value.All(char.IsAsciiDigit)
+                        || !long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out timestamp))
                     {
                         throw Malformed($"timestamp \"{Truncate(value)}\" is not unix seconds");
                     }
 
-                    timestamp = parsed;
+                    rawTimestamp = value;
                     break;
 
                 case "v1":
@@ -192,22 +200,12 @@ public static class Webhooks
                         throw Malformed("repeated v1 field");
                     }
 
-                    byte[] decoded;
-                    try
+                    if (value.Length != MacLengthBytes * 2 || !value.All(IsLowercaseHex))
                     {
-                        decoded = Convert.FromHexString(value);
-                    }
-                    catch (FormatException)
-                    {
-                        throw Malformed("the v1 signature is not hex");
+                        throw Malformed("the v1 signature is not 64 lowercase hex characters");
                     }
 
-                    if (decoded.Length != MacLengthBytes)
-                    {
-                        throw Malformed($"the v1 signature is {decoded.Length} bytes, expected {MacLengthBytes}");
-                    }
-
-                    mac = decoded;
+                    mac = Convert.FromHexString(value);
                     break;
 
                 default:
@@ -217,12 +215,12 @@ public static class Webhooks
             }
         }
 
-        if (timestamp is null && mac is null)
+        if (rawTimestamp is null && mac is null)
         {
             throw Malformed("no t or v1 field");
         }
 
-        if (timestamp is null)
+        if (rawTimestamp is null)
         {
             throw Malformed("no t field");
         }
@@ -232,8 +230,10 @@ public static class Webhooks
             throw Malformed("no v1 field");
         }
 
-        return (timestamp.Value, mac);
+        return (rawTimestamp, timestamp, mac);
     }
+
+    private static bool IsLowercaseHex(char c) => c is (>= '0' and <= '9') or (>= 'a' and <= 'f');
 
     private static DominaiteWebhookException Malformed(string detail)
         => new(WebhookFailureReason.MalformedSignature, $"Malformed webhook signature: {detail}.");
