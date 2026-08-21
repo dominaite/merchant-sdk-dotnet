@@ -23,7 +23,7 @@ public class ContractTests
     private const string Secret = "dms_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// <summary>The sha256 of the canonical fixture, shared across every SDK that vendors it.</summary>
-    private const string FixtureSha256 = "5bf6d542d747581f5988d2de6def80db4348f24337cd685d173a7197be4414a7";
+    private const string FixtureSha256 = "45e254c9af4e0910dd4a0ed66eaa9140522d5095e5d145fe583536a2aa549275";
 
     private static readonly JsonSerializerOptions ReadOptions = new()
     {

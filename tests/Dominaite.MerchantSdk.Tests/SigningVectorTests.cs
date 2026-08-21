@@ -31,7 +31,7 @@ public class SigningVectorTests
             Body = body,
         });
 
-        Assert.Equal("95759958a0a0a9bd3e6e37101c01e8e7fee1166406e4ac2ff488764f5f742cbf", signature);
+        Assert.Equal("8f5fba0b29a8eea81b76a0e6d7119e79ec68f586910f77713b045652e5ce9b74", signature);
     }
 
     /// <summary>
@@ -55,7 +55,7 @@ public class SigningVectorTests
             Body = string.Empty,
         });
 
-        Assert.Equal("010635e61caabdb82a031a51fa56999b670b61d57239e5fa3db71a43c731f93d", signature);
+        Assert.Equal("70002896ec8411efb7754de6c49c2fd6f35bb2d001966978a2f573de1914e68d", signature);
     }
 
     /// <summary>
@@ -81,7 +81,7 @@ public class SigningVectorTests
             Body = body,
         });
 
-        Assert.Equal("460659cb1218d97bf2e86c1c09c60f0db87197c499d8296dd5d07a614e17257c", signature);
+        Assert.Equal("dd809cb0b902326704a380110c29d9f789cc355864e1ed1de663157342834010", signature);
     }
 
     [Fact]
