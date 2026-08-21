@@ -297,7 +297,7 @@ public class ClientTests
     public async Task ARedirectIsNeverFollowedAndNeverRetried(int status)
     {
         using var server = new MockServer(
-            Reply.Redirect(status, "https://evil.example.com/merchant-api/bridgerpay/checkout/sessions"),
+            Reply.Redirect(status, "https://evil.example.com/merchant-api/checkout/sessions"),
             Reply.Enveloped(SuccessPayload));
         using var client = ClientFor(server);
 

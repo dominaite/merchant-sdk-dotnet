@@ -56,8 +56,8 @@ Confirm the host for your environment before the first call. **A dev key against
 guaranteed `INVALID_API_KEY`** - keys are issued per environment.
 
 The base URL's own prefix is never part of the signed path: on dev you POST to
-`.../api/merchant-api/bridgerpay/checkout/sessions` but you sign
-`/merchant-api/bridgerpay/checkout/sessions`.
+`.../api/merchant-api/checkout/sessions` but you sign
+`/merchant-api/checkout/sessions`.
 
 ## Quickstart
 
@@ -143,11 +143,11 @@ var signature = RequestSigner.Sign(new SignatureInput
     Secret = "dms_...",
     Timestamp = "1755302400",                                 // unix SECONDS
     Method = "POST",
-    Path = "/merchant-api/bridgerpay/checkout/sessions",       // path only, no host
+    Path = "/merchant-api/checkout/sessions",       // path only, no host
     IdempotencyKey = "00000000-0000-4000-8000-000000000001",   // "" for GET
     Body = """{"amount":2500,"currency":"EUR","orderReference":"order-1042"}""", // "" for GET
 });
-// "95759958a0a0a9bd3e6e37101c01e8e7fee1166406e4ac2ff488764f5f742cbf"
+// "8f5fba0b29a8eea81b76a0e6d7119e79ec68f586910f77713b045652e5ce9b74"
 ```
 
 The signed payload is five lines:

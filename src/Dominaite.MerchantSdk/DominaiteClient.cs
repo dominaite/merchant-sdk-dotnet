@@ -31,7 +31,7 @@ public sealed class DominaiteClient : IDisposable
     /// The canonical path that gets signed. POST creates a session; GET
     /// <c>SessionsPath/{transactionId}</c> reads its status.
     /// </summary>
-    public const string SessionsPath = "/merchant-api/bridgerpay/checkout/sessions";
+    public const string SessionsPath = "/merchant-api/checkout/sessions";
 
     /// <summary>The credentials-and-clock smoke test. Creates nothing.</summary>
     public const string PingPath = "/merchant-api/ping";
