@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <AssemblyName>Dominaite.MerchantSdk</AssemblyName>
+    <RootNamespace>Dominaite.MerchantSdk</RootNamespace>
+    <Version>0.2.0</Version>
+    <Description>Server-side .NET client for the Dominaite merchant API (hosted checkout sessions).</Description>
+    <Authors>Dominaite</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/dominaite/merchant-sdk-dotnet</RepositoryUrl>
+    <!--
+      Nothing is published yet. The NuGet package id is an owner decision (Dominaite.MerchantSdk
+      is only a suggestion), so packing is off until that call is made - flipping this to true
+      is the deliberate step that turns the repo into a publishable package.
+    -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- No PackageReference on purpose: System.Text.Json and HMACSHA256 are in-box on net8.0. -->
+
+</Project>
