@@ -14,10 +14,15 @@
     <Authors>Dominaite</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/dominaite/merchant-sdk-dotnet</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageId>Dominaite.MerchantSdk</PackageId>
     <IsPackable>true</IsPackable>
   </PropertyGroup>
 
   <!-- No PackageReference on purpose: System.Text.Json and HMACSHA256 are in-box on net8.0. -->
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
 
 </Project>
