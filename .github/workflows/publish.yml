@@ -1,0 +1,55 @@
+name: Publish to NuGet
+
+# Publishing is keyless: nuget.org trusts this repo + this workflow file through a
+# Trusted Publishing policy and hands out a temporary API key at run time, so there
+# is no long-lived secret to store, rotate or leak. The policy is registered under
+# the nuget.org account's Trusted Publishing page and must name THIS file (publish.yml).
+#
+# Tag push = release. workflow_dispatch republishes the current csproj version, which
+# is how a tag that predates this workflow (v0.2.0) gets shipped.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required: GitHub mints the OIDC token nuget.org exchanges for a key
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Run the test suite first
+        run: dotnet test tests/Dominaite.MerchantSdk.Tests -c Release
+
+      - name: Refuse a tag that disagrees with the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          csproj_version=$(grep -oP '(?<=<Version>)[^<]+' src/Dominaite.MerchantSdk/Dominaite.MerchantSdk.csproj)
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$csproj_version" != "$tag_version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match <Version>$csproj_version</Version> - bump the csproj or retag."
+            exit 1
+          fi
+
+      - name: Pack
+        run: dotnet pack src/Dominaite.MerchantSdk -c Release -o ./nupkg
+
+      # Requested here, immediately before the push: the key expires in an hour.
+      - name: NuGet login
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: 0ximu # nuget.org profile name, not the sign-in email
+
+      - name: Push
+        run: dotnet nuget push "nupkg/*.nupkg" --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
