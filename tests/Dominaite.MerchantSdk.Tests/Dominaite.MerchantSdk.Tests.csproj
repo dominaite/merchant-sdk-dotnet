@@ -23,6 +23,11 @@
       ContractTests pins its sha256, so an edit here fails rather than papers over drift.
     -->
     <None Include="merchant-api-contract.json" CopyToOutputDirectory="PreserveNewest" />
+    <!--
+      Machine-relevant projection of the gateway's live integration contract, refreshed by
+      .github/workflows/contract-drift.yml. WireContractTests pins the SDK's enumerations to it.
+    -->
+    <None Include="merchant-api-wire-contract.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
