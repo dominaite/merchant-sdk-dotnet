@@ -242,6 +242,13 @@ catch (DominaiteRefusalException error) when (error.TransactionId is { } collide
 `TransactionId` is null when the API did not name one (a concurrent-race `DUPLICATE_REQUEST` knows
 the key is taken but not yet by which row), so check it rather than assuming.
 
+One replay is not a refusal at all. A session that expired unpaid is superseded: from a few
+minutes past its expiry, re-POSTing the same key returns an ordinary success with a fresh session
+(new `TransactionId`, same key), so a customer who comes back late just pays. Keep the
+order-derived key for the life of the order to keep that path open. The band is not endless - once
+the platform has independently closed the attempt (about an hour past expiry), the replay answers
+`PRIOR_ATTEMPT_FAILED` and the key is spent; reconcile with `GetStatusAsync` and use a fresh key.
+
 **Cart changed = new session, new idempotency key.** There is no session-update call: if the
 order's amount or contents change after a session exists, abandon it and mint a fresh session with
 a fresh key. Reusing the old key with a new amount is rejected as `IDEMPOTENCY_KEY_REUSED` by
@@ -395,7 +402,8 @@ reuse.
 Refusal codes on `DominaiteRefusalException`:
 
 - `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later.
-- `DUPLICATE_REQUEST` - a session for this idempotency key is already open.
+- `DUPLICATE_REQUEST` - a session for this idempotency key is already open, or expired within the
+  last few minutes. Re-POST the same key shortly, never a fresh one.
 - `ALREADY_PROCESSED` - this idempotency key's payment already completed.
 - `PRIOR_ATTEMPT_FAILED` - the earlier attempt with this key failed; use a fresh key.
 - `IDEMPOTENCY_KEY_REUSED` - same key sent with a different body; use a fresh key.
