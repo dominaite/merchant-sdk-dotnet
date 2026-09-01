@@ -32,4 +32,21 @@ public class WireContractTests
     {
         Assert.Equal(400, Wire().GetProperty("validationHttpStatus").GetInt32());
     }
+
+    [Fact]
+    public void WalletTypes_MatchTheGateway_InOrder()
+    {
+        Assert.Equal(Strings(Wire().GetProperty("wallets").GetProperty("walletTypes")), WalletTypes.All);
+    }
+
+    [Fact]
+    public void WalletReportingFields_ArePaymentMethodAndWalletType_BothOptional()
+    {
+        var fields = Wire().GetProperty("wallets").GetProperty("reportingFields").EnumerateArray().ToList();
+
+        Assert.Equal(
+            new[] { "paymentMethod", "walletType" },
+            fields.Select(field => field.GetProperty("path").GetString()!).ToList());
+        Assert.All(fields, field => Assert.False(field.GetProperty("required").GetBoolean()));
+    }
 }

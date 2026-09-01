@@ -174,6 +174,67 @@ public static class TransactionStatuses
 }
 
 /// <summary>
+/// Every payment method category the merchant API reports, as constants plus the enumerable
+/// <see cref="All"/>, in the gateway's own order.
+/// </summary>
+/// <remarks>
+/// Reporting data, not a money-flow switch: a wallet payment refunds, captures and disputes
+/// exactly like a plain card payment.
+/// </remarks>
+public static class PaymentMethodCategories
+{
+    /// <summary>A plain card payment.</summary>
+    public const string Card = "card";
+
+    /// <summary>A wallet payment; <see cref="CheckoutStatus.WalletType"/> says which wallet.</summary>
+    public const string Wallet = "wallet";
+
+    /// <summary>A bank transfer.</summary>
+    public const string BankTransfer = "bank_transfer";
+
+    /// <summary>A SEPA payment.</summary>
+    public const string Sepa = "sepa";
+
+    /// <summary>The whole vocabulary, in the order the canonical contract lists it.</summary>
+    public static IReadOnlyList<string> All { get; } =
+    [
+        Card,
+        Wallet,
+        BankTransfer,
+        Sepa,
+    ];
+}
+
+/// <summary>
+/// The wallets the gateway currently names in <see cref="CheckoutStatus.WalletType"/>, as
+/// constants plus the enumerable <see cref="All"/>, pinned against the published contract
+/// fixture.
+/// </summary>
+/// <remarks>
+/// The field can carry a lower-cased identifier not in this list yet - treat unknown values as
+/// a valid wallet, not an error.
+/// </remarks>
+public static class WalletTypes
+{
+    /// <summary>Apple Pay.</summary>
+    public const string ApplePay = "apple_pay";
+
+    /// <summary>Google Pay.</summary>
+    public const string GooglePay = "google_pay";
+
+    /// <summary>Samsung Pay.</summary>
+    public const string SamsungPay = "samsung_pay";
+
+    /// <summary>The whole vocabulary, in the order the canonical contract lists it.</summary>
+    public static IReadOnlyList<string> All { get; } =
+    [
+        ApplePay,
+        GooglePay,
+        SamsungPay,
+    ];
+}
+
+/// <summary>
 /// What <see cref="DominaiteClient.GetStatusAsync"/> returns.
 /// </summary>
 public sealed class CheckoutStatus
@@ -204,6 +265,21 @@ public sealed class CheckoutStatus
     /// which is not the same as zero.
     /// </summary>
     public long? RefundedAmount { get; set; }
+
+    /// <summary>
+    /// How the payer paid, one of the <see cref="PaymentMethodCategories"/> values. Null while
+    /// the payment is still open (no method chosen yet) and on transactions older than the
+    /// field. Also inside <c>data</c> on every <c>payment.*</c> webhook event.
+    /// </summary>
+    public string? PaymentMethod { get; set; }
+
+    /// <summary>
+    /// Which wallet, when <see cref="PaymentMethod"/> is <c>wallet</c>. Values outside
+    /// <see cref="WalletTypes"/> are valid wallets the gateway learned about after this SDK
+    /// released - a lower-cased identifier, not an error. Null for non-wallet payments. Also
+    /// inside <c>data</c> on every <c>payment.*</c> webhook event.
+    /// </summary>
+    public string? WalletType { get; set; }
 
     /// <summary>When the session was created (UTC).</summary>
     public DateTimeOffset? CreatedAt { get; set; }
