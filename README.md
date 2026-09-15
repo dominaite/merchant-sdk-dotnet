@@ -260,6 +260,93 @@ A session is valid for about 2 hours. If the payer comes back later, create a ne
 re-rendering the widget for a stored session, read the status first: a completed session's widget
 shows "session is closed or expired", which reads as an error to someone who just paid.
 
+## Stored payment methods (recurring)
+
+A session can ask the payer to save their card for later. Set `SaveCard = true` on the request;
+nothing else about the session changes, and a request that never sets it sends the exact same
+bytes as before (null is omitted, not sent as `false`).
+
+```csharp
+var session = await client.CreateCheckoutSessionAsync(new CheckoutSessionRequest
+{
+    Amount = 2500,
+    Currency = "EUR",
+    OrderReference = "order-1042",
+    SaveCard = true,
+});
+```
+
+Once that session is paid, `GetStatusAsync` carries a `PaymentMethod`: an id, the brand, the last
+four digits, the expiry and a status (`active`, `revoked` or `expired`). Persist the id against
+your customer. The full card number never reaches the SDK, and the provider token behind the id
+never leaves the gateway.
+
+```csharp
+var status = await client.GetStatusAsync(session.TransactionId);
+if (status.PaymentMethod is { IsChargeable: true } method)
+{
+    await StoreForCustomerAsync(customerId, method.Id); // pm_...
+}
+```
+
+Charge the stored card later, off-session, with `ChargePaymentMethodAsync`. The call takes the
+same amount, currency and order reference as a session, and an idempotency key that is required
+and signed exactly like `CreateCheckoutSessionAsync` (one is generated and written back onto the
+request when you do not set one; pin your own when you retry).
+
+```csharp
+var charge = await client.ChargePaymentMethodAsync(methodId, new ChargeRequest
+{
+    Amount = 2500,
+    Currency = "EUR",
+    OrderReference = "order-1043",
+    Description = "Monthly plan",
+});
+
+switch (charge.Status)
+{
+    case ChargeStatuses.Succeeded:
+        await MarkPaidAsync(charge.TransactionId);
+        break;
+    case ChargeStatuses.Pending:
+        await PollLaterAsync(charge.TransactionId); // not terminal
+        break;
+    default:
+        switch (charge.DeclineClass)
+        {
+            case DeclineClasses.Hard: await StopChargingAsync(methodId); break;   // never retry
+            case DeclineClasses.SoftFunds: await RetryInAFewDaysAsync(); break;
+            case DeclineClasses.SoftScaRequired: await BringThePayerBackAsync(); break; // needs a session
+            default: await RetryLaterAsync(); break;                              // soft_other
+        }
+
+        break;
+}
+```
+
+A decline is a result, not an exception: HTTP 201 with `Status == "failed"` and a `DeclineClass`
+(`hard`, `soft_funds`, `soft_sca_required` or `soft_other`) plus the provider's `DeclineCode`.
+`IsPaid` and `IsTerminal` read the same way they do on a session status. What throws
+`DominaiteRefusalException` is the gateway refusing to attempt the charge at all: a replayed key,
+payments switched off, or a method that is revoked or expired. Those use the same codes as a
+session refusal, so the handling in [Errors](#errors) applies, and the exception carries the
+`IdempotencyKey` to reuse. A 404 is a method id that is not yours.
+
+`RevokePaymentMethodAsync` drops the card: the gateway revokes the token at the provider and marks
+the method `revoked`, and any later charge on it is refused. It is a signed `DELETE` with an empty
+key and an empty body (the same recipe as GET) and resolves on HTTP 204.
+
+```csharp
+await client.RevokePaymentMethodAsync(methodId);
+```
+
+Both routes are pinned by known-answer vectors in `SigningVectorTests` next to the session ones,
+shared byte-for-byte with the gateway: the charge vector signs
+`POST /merchant-api/payment-methods/pm_0123456789abcdef0123456789abcdef/charges` with key
+`00000000-0000-4000-8000-000000000003` and body
+`{"amount":2500,"currency":"EUR","orderReference":"order-1043"}`, the revoke vector signs the
+`DELETE` with nothing else.
+
 ## Webhooks
 
 Webhooks are how you find out a payment succeeded without asking. Point an endpoint at your server

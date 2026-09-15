@@ -17,13 +17,17 @@ namespace Dominaite.MerchantSdk.Tests;
 /// test pass - a mismatch means either this SDK drifted or the gateway changed, and both are
 /// fixed somewhere other than the fixture.
 /// </remarks>
+/// <remarks>
+/// Besides the session surface, this pins the stored-payment-method vocabularies, field sets
+/// and examples: the saved-card status, a succeeded and a declined charge, the bodiless revoke.
+/// </remarks>
 public class ContractTests
 {
     private const string KeyId = "dmk_0123456789abcdef0123456789abcdef";
     private const string Secret = "dms_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// <summary>The sha256 of the canonical fixture, shared across every SDK that vendors it.</summary>
-    private const string FixtureSha256 = "45e254c9af4e0910dd4a0ed66eaa9140522d5095e5d145fe583536a2aa549275";
+    private const string FixtureSha256 = "0b4bbdf9c936f46cbc249a1e31ba6169e34fa66edf28d6477c8bed7cff5ac6cf";
 
     private static readonly JsonSerializerOptions ReadOptions = new()
     {
@@ -70,6 +74,15 @@ public class ContractTests
         Amount = 8440,
         Currency = "EUR",
         OrderReference = "order-1042",
+    };
+
+    private const string PaymentMethodId = "pm_0123456789abcdef0123456789abcdef";
+
+    private static ChargeRequest Charge() => new()
+    {
+        Amount = 2500,
+        Currency = "EUR",
+        OrderReference = "order-1043",
     };
 
     /// <summary>
@@ -323,5 +336,158 @@ public class ContractTests
             Assert.Equal(400, error.HttpStatus);
             Assert.False(error.IsRetryable);
         }
+    }
+
+    [Fact]
+    public void ThePaymentMethodStatusVocabularyIsExactlyTheContracts()
+    {
+        Assert.Equal(Strings(Contract().GetProperty("paymentMethodStatusVocabulary")), PaymentMethodStatuses.All);
+    }
+
+    [Fact]
+    public void TheChargeVocabulariesAreExactlyTheContracts()
+    {
+        var contract = Contract();
+        Assert.Equal(Strings(contract.GetProperty("chargeStatusVocabulary")), ChargeStatuses.All);
+        Assert.Equal(Strings(contract.GetProperty("declineClassVocabulary")), DeclineClasses.All);
+    }
+
+    [Fact]
+    public void ThePaymentMethodObjectMatchesTheContract()
+    {
+        var getStatus = Endpoint("getStatus");
+        AssertFields<PaymentMethod>(Strings(getStatus.GetProperty("paymentMethodFields")));
+
+        var parsed = JsonSerializer.Deserialize<CheckoutStatus>(
+            getStatus.GetProperty("savedCardExample").GetRawText(),
+            ReadOptions)!;
+
+        // The saved-card example is the plain example plus a paymentMethod: nothing else may move
+        // when a card was stored.
+        Assert.Equal(TransactionStatuses.Succeeded, parsed.Status);
+        Assert.Equal("order-1042", parsed.OrderReference);
+        var method = Assert.IsType<PaymentMethod>(parsed.PaymentMethod);
+        Assert.Equal(PaymentMethodId, method.Id);
+        Assert.Equal("visa", method.Brand);
+        Assert.Equal("4242", method.Last4);
+        Assert.Equal(12, method.ExpiryMonth);
+        Assert.Equal(2029, method.ExpiryYear);
+        Assert.Equal(PaymentMethodStatuses.Active, method.Status);
+        Assert.True(method.IsChargeable);
+    }
+
+    [Fact]
+    public void EveryPaymentMethodStatusRoundTripsAndOnlyActiveIsChargeable()
+    {
+        var example = Endpoint("getStatus").GetProperty("savedCardExample").GetProperty("paymentMethod");
+
+        foreach (var value in Strings(Contract().GetProperty("paymentMethodStatusVocabulary")))
+        {
+            var payload = JsonNode.Parse(example.GetRawText())!;
+            payload["status"] = value;
+
+            var method = JsonSerializer.Deserialize<PaymentMethod>(payload.ToJsonString(), ReadOptions)!;
+
+            Assert.Equal(value, method.Status);
+            Assert.Equal(value == PaymentMethodStatuses.Active, method.IsChargeable);
+        }
+    }
+
+    [Fact]
+    public void ChargePaymentMethodMatchesTheContract()
+    {
+        var charge = Endpoint("chargePaymentMethod");
+        Assert.Equal("POST", charge.GetProperty("method").GetString());
+        Assert.Equal("/merchant-api/payment-methods/{paymentMethodId}/charges", charge.GetProperty("path").GetString());
+        Assert.Equal(201, charge.GetProperty("httpStatus").GetInt32());
+        AssertFields<PaymentMethodCharge>(Strings(charge.GetProperty("fields")));
+
+        // Both examples carry exactly the declared fields, nulls included.
+        var expected = Strings(charge.GetProperty("fields")).Order().ToList();
+        foreach (var name in new[] { "successExample", "declinedExample" })
+        {
+            var keys = charge.GetProperty(name)
+                .EnumerateObject()
+                .Select(property => property.Name)
+                .Order()
+                .ToList();
+
+            Assert.Equal(expected, keys);
+        }
+    }
+
+    [Fact]
+    public async Task TheChargeSuccessExampleComesBackAsAPaidCharge()
+    {
+        var charge = Endpoint("chargePaymentMethod");
+        using var server = new MockServer(Reply.Raw(201, charge.GetProperty("successExample").GetRawText()));
+        using var client = ClientFor(server);
+
+        var result = await client.ChargePaymentMethodAsync(PaymentMethodId, Charge());
+
+        Assert.Equal("chg_7a8b9c0d1e2f3a4b", result.ChargeId);
+        Assert.Equal(ChargeStatuses.Succeeded, result.Status);
+        Assert.Null(result.DeclineClass);
+        Assert.Null(result.DeclineCode);
+        Assert.Equal("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", result.TransactionId);
+        Assert.True(result.IsPaid);
+        Assert.True(result.IsTerminal);
+    }
+
+    [Fact]
+    public async Task TheChargeDeclinedExampleComesBackAsAFailedChargeNotAnException()
+    {
+        var charge = Endpoint("chargePaymentMethod");
+        using var server = new MockServer(Reply.Raw(201, charge.GetProperty("declinedExample").GetRawText()));
+        using var client = ClientFor(server);
+
+        var result = await client.ChargePaymentMethodAsync(PaymentMethodId, Charge());
+
+        Assert.Equal("chg_7a8b9c0d1e2f3a4c", result.ChargeId);
+        Assert.Equal(ChargeStatuses.Failed, result.Status);
+        Assert.Equal(DeclineClasses.SoftFunds, result.DeclineClass);
+        Assert.Equal("51", result.DeclineCode);
+        Assert.Equal("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e", result.TransactionId);
+        Assert.False(result.IsPaid);
+        Assert.True(result.IsTerminal);
+        Assert.Contains(result.DeclineClass, DeclineClasses.All);
+    }
+
+    /// <summary>The charge endpoint reuses the create endpoint's refusal shape and codes.</summary>
+    [Fact]
+    public async Task EveryChargeRefusalCodeSurvivesAsARefusal()
+    {
+        foreach (var code in Strings(Contract().GetProperty("sessionRefusalErrorCodes")))
+        {
+            using var server = new MockServer(Reply.Enveloped(
+                $$"""{"success":false,"errorCode":"{{code}}","errorMessage":"refused","transactionId":"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"}"""));
+            using var client = ClientFor(server);
+
+            var error = await Assert.ThrowsAsync<DominaiteRefusalException>(
+                () => client.ChargePaymentMethodAsync(PaymentMethodId, Charge()));
+
+            Assert.Equal(code, error.Code);
+            Assert.False(error.IsRetryable);
+        }
+    }
+
+    [Fact]
+    public async Task RevokePaymentMethodMatchesTheContract()
+    {
+        var revoke = Endpoint("revokePaymentMethod");
+        Assert.Equal("DELETE", revoke.GetProperty("method").GetString());
+        Assert.Equal("/merchant-api/payment-methods/{paymentMethodId}", revoke.GetProperty("path").GetString());
+        Assert.Equal(204, revoke.GetProperty("httpStatus").GetInt32());
+        Assert.Empty(Strings(revoke.GetProperty("fields")));
+
+        using var server = new MockServer(Reply.Raw(204, string.Empty));
+        using var client = ClientFor(server);
+
+        await client.RevokePaymentMethodAsync(PaymentMethodId);
+
+        var sent = server.LastRequest;
+        Assert.Equal("DELETE", sent.Method);
+        Assert.Equal(string.Empty, sent.Body);
+        Assert.Null(sent.Header("Idempotency-Key"));
     }
 }
