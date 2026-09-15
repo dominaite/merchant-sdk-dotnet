@@ -19,7 +19,10 @@ namespace Dominaite.MerchantSdk.Tests;
 /// </remarks>
 /// <remarks>
 /// Besides the session surface, this pins the stored-payment-method vocabularies, field sets
-/// and examples: the saved-card status, a succeeded and a declined charge, the bodiless revoke.
+/// and examples: the saved-card status, a 201 charge, a 402 decline, every coded charge and
+/// revoke error, the bodiless revoke. Every example is pushed through the client twice: as
+/// spelled, and with its null members removed, because the gateway omits null fields on the
+/// wire.
 /// </remarks>
 public class ContractTests
 {
@@ -27,7 +30,7 @@ public class ContractTests
     private const string Secret = "dms_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// <summary>The sha256 of the canonical fixture, shared across every SDK that vendors it.</summary>
-    private const string FixtureSha256 = "0b4bbdf9c936f46cbc249a1e31ba6169e34fa66edf28d6477c8bed7cff5ac6cf";
+    private const string FixtureSha256 = "8bd0b6037f245d1c3d4e6c01aad42bef666a66f086f03c6b00a75e5023f88f20";
 
     private static readonly JsonSerializerOptions ReadOptions = new()
     {
@@ -84,6 +87,42 @@ public class ContractTests
         Currency = "EUR",
         OrderReference = "order-1043",
     };
+
+    /// <summary>
+    /// The example with every null object member removed, recursively: the gateway's serializer
+    /// omits nulls, so this is what actually crosses the wire.
+    /// </summary>
+    private static JsonNode? WithoutNulls(JsonNode? node)
+    {
+        switch (node)
+        {
+            case JsonObject members:
+                var stripped = new JsonObject();
+                foreach (var (key, member) in members)
+                {
+                    if (member is not null)
+                    {
+                        stripped[key] = WithoutNulls(member);
+                    }
+                }
+
+                return stripped;
+            case JsonArray items:
+                return new JsonArray([.. items.Select(item => WithoutNulls(item))]);
+            default:
+                return node?.DeepClone();
+        }
+    }
+
+    /// <summary>An example in both wire forms, labelled.</summary>
+    private static IEnumerable<(string Form, string Body)> BothWireForms(JsonElement example)
+    {
+        yield return ("as spelled", example.GetRawText());
+        yield return ("without nulls", WithoutNulls(JsonNode.Parse(example.GetRawText()))!.ToJsonString());
+    }
+
+    private static List<string> Keys(JsonElement value)
+        => [.. value.EnumerateObject().Select(property => property.Name).Order()];
 
     /// <summary>
     /// The vendored fixture must be byte-identical to the canonical one. Editing it locally to
@@ -339,9 +378,9 @@ public class ContractTests
     }
 
     [Fact]
-    public void ThePaymentMethodStatusVocabularyIsExactlyTheContracts()
+    public void TheStoredPaymentMethodStatusVocabularyIsExactlyTheContracts()
     {
-        Assert.Equal(Strings(Contract().GetProperty("paymentMethodStatusVocabulary")), PaymentMethodStatuses.All);
+        Assert.Equal(Strings(Contract().GetProperty("storedPaymentMethodStatusVocabulary")), StoredPaymentMethodStatuses.All);
     }
 
     [Fact]
@@ -350,46 +389,83 @@ public class ContractTests
         var contract = Contract();
         Assert.Equal(Strings(contract.GetProperty("chargeStatusVocabulary")), ChargeStatuses.All);
         Assert.Equal(Strings(contract.GetProperty("declineClassVocabulary")), DeclineClasses.All);
+        Assert.Equal(Strings(contract.GetProperty("chargeErrorCodes")), ChargeErrorCodes.All);
+        Assert.Equal(Strings(contract.GetProperty("revokeErrorCodes")), RevokeErrorCodes.All);
     }
 
     [Fact]
-    public void ThePaymentMethodObjectMatchesTheContract()
+    public void TheStoredPaymentMethodObjectMatchesTheContract()
     {
         var getStatus = Endpoint("getStatus");
-        AssertFields<PaymentMethod>(Strings(getStatus.GetProperty("paymentMethodFields")));
+        AssertFields<StoredPaymentMethod>(Strings(getStatus.GetProperty("storedPaymentMethodFields")));
 
-        var parsed = JsonSerializer.Deserialize<CheckoutStatus>(
-            getStatus.GetProperty("savedCardExample").GetRawText(),
-            ReadOptions)!;
+        foreach (var (form, body) in BothWireForms(getStatus.GetProperty("savedCardExample")))
+        {
+            var parsed = JsonSerializer.Deserialize<CheckoutStatus>(body, ReadOptions)!;
 
-        // The saved-card example is the plain example plus a paymentMethod: nothing else may move
-        // when a card was stored.
-        Assert.Equal(TransactionStatuses.Succeeded, parsed.Status);
-        Assert.Equal("order-1042", parsed.OrderReference);
-        var method = Assert.IsType<PaymentMethod>(parsed.PaymentMethod);
-        Assert.Equal(PaymentMethodId, method.Id);
-        Assert.Equal("visa", method.Brand);
-        Assert.Equal("4242", method.Last4);
-        Assert.Equal(12, method.ExpiryMonth);
-        Assert.Equal(2029, method.ExpiryYear);
-        Assert.Equal(PaymentMethodStatuses.Active, method.Status);
-        Assert.True(method.IsChargeable);
+            // The saved-card example is the plain example plus a storedPaymentMethod: nothing
+            // else may move when a card was stored.
+            Assert.Equal(TransactionStatuses.Succeeded, parsed.Status);
+            Assert.Equal("order-1042", parsed.OrderReference);
+            var method = Assert.IsType<StoredPaymentMethod>(parsed.StoredPaymentMethod);
+            Assert.Equal(PaymentMethodId, method.Id);
+            Assert.Equal("visa", method.Brand);
+            Assert.Equal("4242", method.Last4);
+            Assert.Equal(12, method.ExpiryMonth);
+            Assert.Equal(2029, method.ExpiryYear);
+            Assert.Equal(StoredPaymentMethodStatuses.Active, method.Status);
+            Assert.True(method.IsChargeable, form);
+        }
     }
 
     [Fact]
-    public void EveryPaymentMethodStatusRoundTripsAndOnlyActiveIsChargeable()
+    public async Task TheStatusExampleWithoutASavedCardReadsNullInBothWireForms()
     {
-        var example = Endpoint("getStatus").GetProperty("savedCardExample").GetProperty("paymentMethod");
+        var getStatus = Endpoint("getStatus");
+        Assert.Equal(JsonValueKind.Null, getStatus.GetProperty("example").GetProperty("storedPaymentMethod").ValueKind);
 
-        foreach (var value in Strings(Contract().GetProperty("paymentMethodStatusVocabulary")))
+        foreach (var (form, body) in BothWireForms(getStatus.GetProperty("example")))
+        {
+            using var server = new MockServer(Reply.Enveloped(body));
+            using var client = ClientFor(server);
+
+            var parsed = await client.GetStatusAsync("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0");
+
+            Assert.True(parsed.StoredPaymentMethod is null, form);
+        }
+    }
+
+    [Fact]
+    public void AStoredPaymentMethodWithNullDetailsReadsNullInBothWireForms()
+    {
+        var bare = JsonDocument.Parse(
+            $$"""{"id":"{{PaymentMethodId}}","brand":null,"last4":null,"expiryMonth":null,"expiryYear":null,"status":"active"}""").RootElement.Clone();
+
+        foreach (var (form, body) in BothWireForms(bare))
+        {
+            var method = JsonSerializer.Deserialize<StoredPaymentMethod>(body, ReadOptions)!;
+            Assert.Null(method.Brand);
+            Assert.Null(method.Last4);
+            Assert.Null(method.ExpiryMonth);
+            Assert.Null(method.ExpiryYear);
+            Assert.True(method.IsChargeable, form);
+        }
+    }
+
+    [Fact]
+    public void EveryStoredPaymentMethodStatusRoundTripsAndOnlyActiveIsChargeable()
+    {
+        var example = Endpoint("getStatus").GetProperty("savedCardExample").GetProperty("storedPaymentMethod");
+
+        foreach (var value in Strings(Contract().GetProperty("storedPaymentMethodStatusVocabulary")))
         {
             var payload = JsonNode.Parse(example.GetRawText())!;
             payload["status"] = value;
 
-            var method = JsonSerializer.Deserialize<PaymentMethod>(payload.ToJsonString(), ReadOptions)!;
+            var method = JsonSerializer.Deserialize<StoredPaymentMethod>(payload.ToJsonString(), ReadOptions)!;
 
             Assert.Equal(value, method.Status);
-            Assert.Equal(value == PaymentMethodStatuses.Active, method.IsChargeable);
+            Assert.Equal(value == StoredPaymentMethodStatuses.Active, method.IsChargeable);
         }
     }
 
@@ -400,19 +476,39 @@ public class ContractTests
         Assert.Equal("POST", charge.GetProperty("method").GetString());
         Assert.Equal("/merchant-api/payment-methods/{paymentMethodId}/charges", charge.GetProperty("path").GetString());
         Assert.Equal(201, charge.GetProperty("httpStatus").GetInt32());
+        Assert.Equal(402, charge.GetProperty("declinedHttpStatus").GetInt32());
         AssertFields<PaymentMethodCharge>(Strings(charge.GetProperty("fields")));
 
-        // Both examples carry exactly the declared fields, nulls included.
+        // Both examples are envelopes whose data carries exactly the declared fields, nulls
+        // included.
         var expected = Strings(charge.GetProperty("fields")).Order().ToList();
         foreach (var name in new[] { "successExample", "declinedExample" })
         {
-            var keys = charge.GetProperty(name)
-                .EnumerateObject()
-                .Select(property => property.Name)
-                .Order()
-                .ToList();
+            Assert.Equal(expected, Keys(charge.GetProperty(name).GetProperty("data")));
+        }
 
-            Assert.Equal(expected, keys);
+        Assert.True(charge.GetProperty("successExample").GetProperty("success").GetBoolean());
+        Assert.False(charge.GetProperty("declinedExample").GetProperty("success").GetBoolean());
+        Assert.Equal("CHARGE_DECLINED", charge.GetProperty("declinedExample").GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public void EveryChargeStatusRoundTripsAndOnlySucceededIsPaid()
+    {
+        var example = Endpoint("chargePaymentMethod").GetProperty("successExample").GetProperty("data");
+
+        foreach (var value in Strings(Contract().GetProperty("chargeStatusVocabulary")))
+        {
+            var payload = JsonNode.Parse(example.GetRawText())!;
+            payload["status"] = value;
+
+            var charge = JsonSerializer.Deserialize<PaymentMethodCharge>(payload.ToJsonString(), ReadOptions)!;
+
+            Assert.Equal(value, charge.Status);
+            Assert.Equal(value == ChargeStatuses.Succeeded, charge.IsPaid);
+
+            // Only pending keeps the caller polling.
+            Assert.Equal(value != ChargeStatuses.Pending, charge.IsTerminal);
         }
     }
 
@@ -420,54 +516,140 @@ public class ContractTests
     public async Task TheChargeSuccessExampleComesBackAsAPaidCharge()
     {
         var charge = Endpoint("chargePaymentMethod");
-        using var server = new MockServer(Reply.Raw(201, charge.GetProperty("successExample").GetRawText()));
-        using var client = ClientFor(server);
+        foreach (var (form, body) in BothWireForms(charge.GetProperty("successExample")))
+        {
+            using var server = new MockServer(Reply.Raw(201, body));
+            using var client = ClientFor(server);
 
-        var result = await client.ChargePaymentMethodAsync(PaymentMethodId, Charge());
+            var result = await client.ChargePaymentMethodAsync(PaymentMethodId, Charge());
 
-        Assert.Equal("chg_7a8b9c0d1e2f3a4b", result.ChargeId);
-        Assert.Equal(ChargeStatuses.Succeeded, result.Status);
-        Assert.Null(result.DeclineClass);
-        Assert.Null(result.DeclineCode);
-        Assert.Equal("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", result.TransactionId);
-        Assert.True(result.IsPaid);
-        Assert.True(result.IsTerminal);
+            Assert.Equal("ch_1a2b3c4d5e6f4a7b8c9d0e1f2a3b4c5d", result.ChargeId);
+            Assert.Equal(ChargeStatuses.Succeeded, result.Status);
+            Assert.Null(result.DeclineClass);
+            Assert.Null(result.DeclineCode);
+            Assert.Equal("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", result.TransactionId);
+            Assert.True(result.IsPaid, form);
+            Assert.True(result.IsTerminal, form);
+
+            // Raw is the charge object, not the envelope.
+            Assert.Equal("ch_1a2b3c4d5e6f4a7b8c9d0e1f2a3b4c5d", result.Raw.GetProperty("chargeId").GetString());
+            Assert.False(result.Raw.TryGetProperty("success", out _));
+        }
     }
 
     [Fact]
     public async Task TheChargeDeclinedExampleComesBackAsAFailedChargeNotAnException()
     {
         var charge = Endpoint("chargePaymentMethod");
-        using var server = new MockServer(Reply.Raw(201, charge.GetProperty("declinedExample").GetRawText()));
-        using var client = ClientFor(server);
-
-        var result = await client.ChargePaymentMethodAsync(PaymentMethodId, Charge());
-
-        Assert.Equal("chg_7a8b9c0d1e2f3a4c", result.ChargeId);
-        Assert.Equal(ChargeStatuses.Failed, result.Status);
-        Assert.Equal(DeclineClasses.SoftFunds, result.DeclineClass);
-        Assert.Equal("51", result.DeclineCode);
-        Assert.Equal("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e", result.TransactionId);
-        Assert.False(result.IsPaid);
-        Assert.True(result.IsTerminal);
-        Assert.Contains(result.DeclineClass, DeclineClasses.All);
-    }
-
-    /// <summary>The charge endpoint reuses the create endpoint's refusal shape and codes.</summary>
-    [Fact]
-    public async Task EveryChargeRefusalCodeSurvivesAsARefusal()
-    {
-        foreach (var code in Strings(Contract().GetProperty("sessionRefusalErrorCodes")))
+        foreach (var (form, body) in BothWireForms(charge.GetProperty("declinedExample")))
         {
-            using var server = new MockServer(Reply.Enveloped(
-                $$"""{"success":false,"errorCode":"{{code}}","errorMessage":"refused","transactionId":"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"}"""));
+            using var server = new MockServer(Reply.Raw(402, body));
             using var client = ClientFor(server);
 
-            var error = await Assert.ThrowsAsync<DominaiteRefusalException>(
+            var result = await client.ChargePaymentMethodAsync(PaymentMethodId, Charge());
+
+            Assert.Equal("ch_1a2b3c4d5e6f4a7b8c9d0e1f2a3b4c5e", result.ChargeId);
+            Assert.Equal(ChargeStatuses.Failed, result.Status);
+            Assert.Equal(DeclineClasses.SoftFunds, result.DeclineClass);
+            Assert.Equal("51", result.DeclineCode);
+            Assert.Equal("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5e", result.TransactionId);
+            Assert.False(result.IsPaid, form);
+            Assert.True(result.IsTerminal, form);
+            Assert.Contains(result.DeclineClass, DeclineClasses.All);
+        }
+    }
+
+    [Fact]
+    public async Task EveryChargeErrorExampleComesBackAsAChargeException()
+    {
+        var examples = Endpoint("chargePaymentMethod").GetProperty("errorExamples").EnumerateArray().ToList();
+
+        // Eight examples for seven codes: CHARGE_FAILED is spelled both with and without an
+        // attached charge row.
+        Assert.Equal(8, examples.Count);
+        Assert.Equal(
+            Strings(Contract().GetProperty("chargeErrorCodes")).Order().ToList(),
+            examples.Select(example => example.GetProperty("code").GetString()!).Distinct().Order().ToList());
+
+        foreach (var example in examples)
+        {
+            var httpStatus = example.GetProperty("httpStatus").GetInt32();
+            var code = example.GetProperty("code").GetString()!;
+            var body = example.GetProperty("body");
+            Assert.Equal(code, body.GetProperty("error").GetProperty("code").GetString());
+            var hasData = body.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object;
+            var expectsCharge = hasData && data.TryGetProperty("chargeId", out var chargeId) && chargeId.ValueKind == JsonValueKind.String;
+
+            foreach (var (form, wire) in BothWireForms(body))
+            {
+                var label = $"{code} ({httpStatus}, {form})";
+                using var server = new MockServer(Reply.Raw(httpStatus, wire));
+                using var client = ClientFor(server);
+
+                var error = await Assert.ThrowsAsync<DominaiteChargeException>(
+                    () => client.ChargePaymentMethodAsync(PaymentMethodId, Charge()));
+
+                Assert.False(error.IsRetryable, label);
+                Assert.Equal(httpStatus, error.HttpStatus);
+                Assert.Equal(code, error.Code);
+                Assert.Equal(body.GetProperty("error").GetProperty("message").GetString(), error.Message);
+                Assert.NotNull(error.IdempotencyKey);
+
+                // RawResult is the whole envelope.
+                Assert.Equal(code, error.RawResult.GetProperty("error").GetProperty("code").GetString());
+                Assert.False(error.RawResult.GetProperty("success").GetBoolean());
+
+                if (expectsCharge)
+                {
+                    var charge = Assert.IsType<PaymentMethodCharge>(error.Charge);
+                    Assert.Equal(data.GetProperty("chargeId").GetString(), charge.ChargeId);
+                    Assert.Equal(data.GetProperty("status").GetString(), charge.Status);
+                    Assert.Null(charge.DeclineClass);
+                    Assert.Null(charge.DeclineCode);
+                    Assert.Equal(data.GetProperty("transactionId").GetString(), error.TransactionId);
+                }
+                else
+                {
+                    Assert.True(error.Charge is null, label);
+                    Assert.Null(error.TransactionId);
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TheChargeOutcomeUnknownExampleNamesTheTransactionToPoll()
+    {
+        var example = Endpoint("chargePaymentMethod").GetProperty("errorExamples")[0];
+        Assert.Equal(ChargeErrorCodes.ChargeOutcomeUnknown, example.GetProperty("code").GetString());
+
+        using var server = new MockServer(Reply.Raw(502, example.GetProperty("body").GetRawText()));
+        using var client = ClientFor(server);
+
+        var error = await Assert.ThrowsAsync<DominaiteChargeException>(
+            () => client.ChargePaymentMethodAsync(PaymentMethodId, Charge()));
+
+        Assert.Equal("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5f", error.TransactionId);
+        Assert.Equal(ChargeStatuses.Pending, error.Charge!.Status);
+    }
+
+    [Fact]
+    public async Task TheChargeNotFoundExampleIsAnApiErrorWithItsCode()
+    {
+        var example = Endpoint("chargePaymentMethod").GetProperty("notFoundExample");
+        Assert.Equal(404, example.GetProperty("httpStatus").GetInt32());
+
+        foreach (var (form, body) in BothWireForms(example.GetProperty("body")))
+        {
+            using var server = new MockServer(Reply.Raw(404, body));
+            using var client = ClientFor(server);
+
+            var error = await Assert.ThrowsAsync<DominaiteApiException>(
                 () => client.ChargePaymentMethodAsync(PaymentMethodId, Charge()));
 
-            Assert.Equal(code, error.Code);
-            Assert.False(error.IsRetryable);
+            Assert.Equal(404, error.HttpStatus);
+            Assert.Equal("PAYMENT_METHOD_NOT_FOUND", error.Code);
+            Assert.False(error.IsRetryable, form);
         }
     }
 
@@ -489,5 +671,59 @@ public class ContractTests
         Assert.Equal("DELETE", sent.Method);
         Assert.Equal(string.Empty, sent.Body);
         Assert.Null(sent.Header("Idempotency-Key"));
+    }
+
+    [Fact]
+    public async Task EveryRevokeErrorExampleComesBackAsARevokeException()
+    {
+        var examples = Endpoint("revokePaymentMethod").GetProperty("errorExamples").EnumerateArray().ToList();
+        Assert.Equal(2, examples.Count);
+        var codes = Strings(Contract().GetProperty("revokeErrorCodes"));
+
+        foreach (var example in examples)
+        {
+            var httpStatus = example.GetProperty("httpStatus").GetInt32();
+            var code = example.GetProperty("code").GetString()!;
+            var body = example.GetProperty("body");
+            Assert.Contains(code, codes);
+
+            foreach (var (form, wire) in BothWireForms(body))
+            {
+                var label = $"{code} ({httpStatus}, {form})";
+                using var server = new MockServer(Reply.Raw(httpStatus, wire));
+                using var client = ClientFor(server);
+
+                var error = await Assert.ThrowsAsync<DominaiteRevokeException>(
+                    () => client.RevokePaymentMethodAsync(PaymentMethodId));
+
+                Assert.False(error.IsRetryable, label);
+                Assert.Equal(httpStatus, error.HttpStatus);
+                Assert.Equal(code, error.Code);
+                Assert.Equal(body.GetProperty("error").GetProperty("message").GetString(), error.Message);
+                Assert.Equal(code, error.RawResult.GetProperty("error").GetProperty("code").GetString());
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TheRevokeNotFoundExampleIsAValidationErrorApiError()
+    {
+        var example = Endpoint("revokePaymentMethod").GetProperty("notFoundExample");
+        Assert.Equal(404, example.GetProperty("httpStatus").GetInt32());
+        Assert.Equal("VALIDATION_ERROR", example.GetProperty("code").GetString());
+        Assert.Equal("id", example.GetProperty("body").GetProperty("error").GetProperty("validationErrors")[0].GetProperty("field").GetString());
+
+        foreach (var (form, body) in BothWireForms(example.GetProperty("body")))
+        {
+            using var server = new MockServer(Reply.Raw(404, body));
+            using var client = ClientFor(server);
+
+            var error = await Assert.ThrowsAsync<DominaiteApiException>(
+                () => client.RevokePaymentMethodAsync(PaymentMethodId));
+
+            Assert.Equal(404, error.HttpStatus);
+            Assert.Equal("VALIDATION_ERROR", error.Code);
+            Assert.False(error.IsRetryable, form);
+        }
     }
 }

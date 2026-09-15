@@ -57,8 +57,8 @@ public sealed class CheckoutSessionRequest
 
     /// <summary>
     /// Ask the payer to save their card for later off-session charges. Once the session is
-    /// paid, <see cref="CheckoutStatus.PaymentMethod"/> carries the stored method to charge
-    /// with <see cref="DominaiteClient.ChargePaymentMethodAsync"/>.
+    /// paid, <see cref="CheckoutStatus.StoredPaymentMethod"/> carries the stored method to
+    /// charge with <see cref="DominaiteClient.ChargePaymentMethodAsync"/>.
     /// </summary>
     /// <remarks>
     /// Null is omitted from the body, so a request that never sets it sends the exact bytes it
@@ -230,11 +230,19 @@ public sealed class CheckoutStatus
     public DateTimeOffset? ExpiresAt { get; set; }
 
     /// <summary>
-    /// The card stored by a session that asked for <see cref="CheckoutSessionRequest.SaveCard"/>,
-    /// once paid. Null when no card was saved. Persist <see cref="PaymentMethod.Id"/> against
-    /// your customer; it is the only handle you need for later charges.
+    /// The card kept on file for this payment. Present once a session created with
+    /// <see cref="CheckoutSessionRequest.SaveCard"/> has been approved, and it stays present
+    /// after a revoke with status <c>revoked</c>; null (absent on the wire) until then, for
+    /// sessions without SaveCard, and for declined or abandoned ones. Persist
+    /// <see cref="StoredPaymentMethod.Id"/> against your customer; it is what
+    /// <see cref="DominaiteClient.ChargePaymentMethodAsync"/> takes.
     /// </summary>
-    public PaymentMethod? PaymentMethod { get; set; }
+    /// <remarks>
+    /// Not to be confused with the gateway's <c>paymentMethod</c> field, which is the string
+    /// category of how the payer paid (<c>card</c>, <c>wallet</c>, ...) and stays on
+    /// <see cref="Raw"/> untyped.
+    /// </remarks>
+    public StoredPaymentMethod? StoredPaymentMethod { get; set; }
 
     /// <summary>The unparsed payload, for fields this class does not model yet.</summary>
     [JsonIgnore]
@@ -275,17 +283,20 @@ public sealed class CheckoutStatus
 
 /// <summary>
 /// The stored payment method status wire values, as constants plus the enumerable
-/// <see cref="PaymentMethodStatuses.All"/>.
+/// <see cref="StoredPaymentMethodStatuses.All"/>.
 /// </summary>
-public static class PaymentMethodStatuses
+public static class StoredPaymentMethodStatuses
 {
     /// <summary>The card can be charged. The ONLY value that means chargeable.</summary>
     public const string Active = "active";
 
-    /// <summary>Revoked by you or by the payer; a charge on it is refused.</summary>
+    /// <summary>
+    /// What <see cref="DominaiteClient.RevokePaymentMethodAsync"/> leaves behind; a charge on it
+    /// is refused with <c>PAYMENT_METHOD_NOT_ACTIVE</c>.
+    /// </summary>
     public const string Revoked = "revoked";
 
-    /// <summary>The card expired; a charge on it is refused.</summary>
+    /// <summary>The card's expiry date has passed; a charge on it is refused.</summary>
     public const string Expired = "expired";
 
     /// <summary>The whole vocabulary, in the order the canonical contract lists it.</summary>
@@ -293,28 +304,33 @@ public static class PaymentMethodStatuses
 }
 
 /// <summary>
-/// A card stored by a session that asked for <see cref="CheckoutSessionRequest.SaveCard"/>.
+/// A card kept on file by a session that asked for <see cref="CheckoutSessionRequest.SaveCard"/>.
 /// Display fields only: the card number never reaches this SDK, and the provider token behind
-/// the id never leaves the gateway.
+/// the id never leaves the gateway. <see cref="Brand"/>, <see cref="Last4"/> and the expiry are
+/// null when the provider did not report them (the gateway omits null fields on the wire; the
+/// SDK reads absent as null).
 /// </summary>
-public sealed class PaymentMethod
+public sealed class StoredPaymentMethod
 {
-    /// <summary>The stored method id (<c>pm_...</c>). Persist it against your customer.</summary>
+    /// <summary>
+    /// Opaque id: <c>pm_</c> followed by 32 hex characters, case-sensitive. The handle you charge
+    /// and revoke with; persist it against your customer.
+    /// </summary>
     public string Id { get; set; } = string.Empty;
 
-    /// <summary>The card brand, e.g. "visa".</summary>
-    public string Brand { get; set; } = string.Empty;
+    /// <summary>The card brand as the gateway reports it, e.g. "visa", "mastercard".</summary>
+    public string? Brand { get; set; }
 
-    /// <summary>The last four digits, for display.</summary>
-    public string Last4 { get; set; } = string.Empty;
+    /// <summary>The last four digits of the card number, for display only.</summary>
+    public string? Last4 { get; set; }
 
     /// <summary>Expiry month, 1 to 12.</summary>
-    public int ExpiryMonth { get; set; }
+    public int? ExpiryMonth { get; set; }
 
-    /// <summary>Expiry year, four digits.</summary>
-    public int ExpiryYear { get; set; }
+    /// <summary>Expiry year, four digits, e.g. 2029.</summary>
+    public int? ExpiryYear { get; set; }
 
-    /// <summary>One of the <see cref="PaymentMethodStatuses"/> values.</summary>
+    /// <summary>One of the <see cref="StoredPaymentMethodStatuses"/> values.</summary>
     public string Status { get; set; } = string.Empty;
 
     /// <summary>
@@ -322,7 +338,7 @@ public sealed class PaymentMethod
     /// so a value the API adds later cannot make you charge a card you should not.
     /// </summary>
     [JsonIgnore]
-    public bool IsChargeable => string.Equals(this.Status, PaymentMethodStatuses.Active, StringComparison.Ordinal);
+    public bool IsChargeable => string.Equals(this.Status, StoredPaymentMethodStatuses.Active, StringComparison.Ordinal);
 }
 
 /// <summary>
@@ -368,7 +384,9 @@ public static class ChargeStatuses
     /// <summary>The card was charged. The ONLY value that means paid.</summary>
     public const string Succeeded = "succeeded";
 
-    /// <summary>The issuer declined; see <see cref="PaymentMethodCharge.DeclineClass"/>.</summary>
+    /// <summary>
+    /// The issuer declined (HTTP 402); see <see cref="PaymentMethodCharge.DeclineClass"/>.
+    /// </summary>
     public const string Failed = "failed";
 
     /// <summary>
@@ -377,8 +395,11 @@ public static class ChargeStatuses
     /// </summary>
     public const string Pending = "pending";
 
+    /// <summary>An authorization voided before capture; no money moved.</summary>
+    public const string Cancelled = "cancelled";
+
     /// <summary>The whole vocabulary, in the order the canonical contract lists it.</summary>
-    public static IReadOnlyList<string> All { get; } = [Succeeded, Failed, Pending];
+    public static IReadOnlyList<string> All { get; } = [Succeeded, Failed, Pending, Cancelled];
 }
 
 /// <summary>
@@ -408,24 +429,33 @@ public static class DeclineClasses
 }
 
 /// <summary>
-/// What <see cref="DominaiteClient.ChargePaymentMethodAsync"/> returns. A decline is a result,
-/// not an exception: check <see cref="IsPaid"/>, then branch on <see cref="DeclineClass"/>.
+/// What <see cref="DominaiteClient.ChargePaymentMethodAsync"/> returns, for a placed charge
+/// (HTTP 201) and for a provider decline (HTTP 402, status <c>failed</c>) alike. A decline is a
+/// result, not an exception: check <see cref="IsPaid"/>, then branch on <see cref="DeclineClass"/>.
+/// Also carried on <see cref="DominaiteChargeException.Charge"/> when the gateway attached the
+/// charge row to its answer.
 /// </summary>
 public sealed class PaymentMethodCharge
 {
-    /// <summary>The charge id (<c>chg_...</c>).</summary>
+    /// <summary>
+    /// <c>ch_</c> followed by 32 hex characters. Store it against the order; it is what support
+    /// asks for.
+    /// </summary>
     public string ChargeId { get; set; } = string.Empty;
 
     /// <summary>One of the <see cref="ChargeStatuses"/> values.</summary>
     public string Status { get; set; } = string.Empty;
 
     /// <summary>
-    /// One of the <see cref="DeclineClasses"/> values when <see cref="Status"/> is
-    /// <c>failed</c>, otherwise null.
+    /// One of the <see cref="DeclineClasses"/> values, set on a 402 decline; null everywhere else
+    /// (the SDK reads absent as null).
     /// </summary>
     public string? DeclineClass { get; set; }
 
-    /// <summary>The provider's decline code when <see cref="Status"/> is <c>failed</c>, otherwise null.</summary>
+    /// <summary>
+    /// The provider's raw decline code, for your logs; branch on <see cref="DeclineClass"/>
+    /// instead. Null when DeclineClass is.
+    /// </summary>
     public string? DeclineCode { get; set; }
 
     /// <summary>
@@ -433,7 +463,10 @@ public sealed class PaymentMethodCharge
     /// </summary>
     public string TransactionId { get; set; } = string.Empty;
 
-    /// <summary>The unparsed payload, for fields this class does not model yet.</summary>
+    /// <summary>
+    /// The unwrapped charge object as the gateway sent it, for fields this class does not model
+    /// yet.
+    /// </summary>
     [JsonIgnore]
     public JsonElement Raw { get; set; }
 
@@ -450,6 +483,7 @@ public sealed class PaymentMethodCharge
     {
         ChargeStatuses.Succeeded => true,
         ChargeStatuses.Failed => true,
+        ChargeStatuses.Cancelled => true,
         _ => false,
     };
 }

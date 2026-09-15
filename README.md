@@ -276,14 +276,16 @@ var session = await client.CreateCheckoutSessionAsync(new CheckoutSessionRequest
 });
 ```
 
-Once that session is paid, `GetStatusAsync` carries a `PaymentMethod`: an id, the brand, the last
-four digits, the expiry and a status (`active`, `revoked` or `expired`). Persist the id against
-your customer. The full card number never reaches the SDK, and the provider token behind the id
-never leaves the gateway.
+Once that session is paid, `GetStatusAsync` carries a `StoredPaymentMethod`: an id, the brand,
+the last four digits, the expiry and a status (`active`, `revoked` or `expired`). Persist the id
+against your customer. The full card number never reaches the SDK, and the provider token behind
+the id never leaves the gateway. `Brand`, `Last4` and the expiry are nullable: the gateway omits
+them when the provider did not report them. This is not the gateway's `paymentMethod` field (the
+string category of how the payer paid), which stays on `Raw`.
 
 ```csharp
 var status = await client.GetStatusAsync(session.TransactionId);
-if (status.PaymentMethod is { IsChargeable: true } method)
+if (status.StoredPaymentMethod is { IsChargeable: true } method)
 {
     await StoreForCustomerAsync(customerId, method.Id); // pm_...
 }
@@ -295,49 +297,95 @@ and signed exactly like `CreateCheckoutSessionAsync` (one is generated and writt
 request when you do not set one; pin your own when you retry).
 
 ```csharp
-var charge = await client.ChargePaymentMethodAsync(methodId, new ChargeRequest
+try
 {
-    Amount = 2500,
-    Currency = "EUR",
-    OrderReference = "order-1043",
-    Description = "Monthly plan",
-});
+    var charge = await client.ChargePaymentMethodAsync(methodId, new ChargeRequest
+    {
+        Amount = 2500,
+        Currency = "EUR",
+        OrderReference = "order-1043",
+        Description = "Monthly plan",
+    });
 
-switch (charge.Status)
+    switch (charge.Status)
+    {
+        case ChargeStatuses.Succeeded:
+            await MarkPaidAsync(charge.TransactionId);
+            break;
+        case ChargeStatuses.Pending:
+            await PollLaterAsync(charge.TransactionId); // not terminal
+            break;
+        case ChargeStatuses.Cancelled:
+            break; // nothing moved
+        default:
+            switch (charge.DeclineClass)
+            {
+                case DeclineClasses.Hard: await StopChargingAsync(methodId); break;   // never retry
+                case DeclineClasses.SoftFunds: await RetryInAFewDaysAsync(); break;
+                case DeclineClasses.SoftScaRequired: await BringThePayerBackAsync(); break; // needs a session
+                default: await RetryLaterAsync(); break;                              // soft_other
+            }
+
+            break;
+    }
+}
+catch (DominaiteChargeException error)
 {
-    case ChargeStatuses.Succeeded:
-        await MarkPaidAsync(charge.TransactionId);
-        break;
-    case ChargeStatuses.Pending:
-        await PollLaterAsync(charge.TransactionId); // not terminal
-        break;
-    default:
-        switch (charge.DeclineClass)
-        {
-            case DeclineClasses.Hard: await StopChargingAsync(methodId); break;   // never retry
-            case DeclineClasses.SoftFunds: await RetryInAFewDaysAsync(); break;
-            case DeclineClasses.SoftScaRequired: await BringThePayerBackAsync(); break; // needs a session
-            default: await RetryLaterAsync(); break;                              // soft_other
-        }
-
-        break;
+    switch (error.Code)
+    {
+        // The provider gave no verdict: the charge MAY have happened. Poll the transaction
+        // (or wait for the webhook); never retry under a new key.
+        case ChargeErrorCodes.ChargeOutcomeUnknown:
+            await PollLaterAsync(error.TransactionId!);
+            break;
+        case ChargeErrorCodes.PaymentMethodNotActive:
+            await AskForAnotherCardAsync();
+            break;
+        // Nothing was charged; retry later with the SAME key (error.IdempotencyKey).
+        case ChargeErrorCodes.DuplicateRequest:
+        case ChargeErrorCodes.PaymentMethodChargesDisabled:
+        case ChargeErrorCodes.PaymentProcessingUnavailable:
+            await RetryLaterAsync();
+            break;
+        default: // CHARGE_FAILED, IDEMPOTENCY_KEY_REUSED
+            throw;
+    }
 }
 ```
 
-A decline is a result, not an exception: HTTP 201 with `Status == "failed"` and a `DeclineClass`
-(`hard`, `soft_funds`, `soft_sca_required` or `soft_other`) plus the provider's `DeclineCode`.
-`IsPaid` and `IsTerminal` read the same way they do on a session status. What throws
-`DominaiteRefusalException` is the gateway refusing to attempt the charge at all: a replayed key,
-payments switched off, or a method that is revoked or expired. Those use the same codes as a
-session refusal, so the handling in [Errors](#errors) applies, and the exception carries the
-`IdempotencyKey` to reuse. A 404 is a method id that is not yours.
+`ChargePaymentMethodAsync` returns for HTTP 201 and for HTTP 402 alike. A decline is a result,
+not an exception: the 402 charge has `Status == "failed"` and a `DeclineClass` (`hard`,
+`soft_funds`, `soft_sca_required` or `soft_other`) plus the provider's `DeclineCode`. `IsPaid` and
+`IsTerminal` read the same way they do on a session status; `pending` is the one status that is
+not terminal.
 
-`RevokePaymentMethodAsync` drops the card: the gateway revokes the token at the provider and marks
-the method `revoked`, and any later charge on it is refused. It is a signed `DELETE` with an empty
-key and an empty body (the same recipe as GET) and resolves on HTTP 204.
+`DominaiteChargeException` is the gateway answering with an error code instead of a charge: HTTP
+409 (`PAYMENT_METHOD_NOT_ACTIVE`, `DUPLICATE_REQUEST`), 422 (`IDEMPOTENCY_KEY_REUSED`), 502
+(`CHARGE_OUTCOME_UNKNOWN`, `CHARGE_FAILED`) or 503 (`PAYMENT_METHOD_CHARGES_DISABLED`,
+`PAYMENT_PROCESSING_UNAVAILABLE`). The exception keeps `HttpStatus`, `Code`, the gateway's
+message, the `IdempotencyKey` to reuse, and the charge row on `Charge` when the gateway attached
+one (always for `CHARGE_OUTCOME_UNKNOWN`, whose `TransactionId` is what you poll). A 404 is a
+method id that is not yours and stays the plain `DominaiteApiException` with code
+`PAYMENT_METHOD_NOT_FOUND`; a 5xx without a gateway code (an HTML page from a proxy) stays
+`DominaiteTransportException`.
+
+`RevokePaymentMethodAsync` drops the card: the gateway deletes the saved credential at the
+provider and marks the method `revoked`, and any later charge on it is refused with
+`PAYMENT_METHOD_NOT_ACTIVE`. It is a signed `DELETE` with an empty key and an empty body (the same
+recipe as GET) and resolves on HTTP 204, again on an already revoked method. When the gateway
+refuses, nothing changed and you get `DominaiteRevokeException` with the code:
+`MERCHANT_API_UNAVAILABLE` (503, retry later) or `UPSTREAM_CONTRACT_ERROR` (502, contact support
+with the id). A 404 is the plain `DominaiteApiException` with code `VALIDATION_ERROR`.
 
 ```csharp
-await client.RevokePaymentMethodAsync(methodId);
+try
+{
+    await client.RevokePaymentMethodAsync(methodId);
+}
+catch (DominaiteRevokeException error) when (error.Code == RevokeErrorCodes.MerchantApiUnavailable)
+{
+    await RetryLaterAsync();
+}
 ```
 
 Both routes are pinned by known-answer vectors in `SigningVectorTests` next to the session ones,
@@ -479,8 +527,10 @@ machine-readable string where there is one.
 |---|---|---|
 | `DominaiteRefusalException` | HTTP 200 with `success: false`. Carries `TransactionId` and `RawResult`. | Branch on `Code`. Do not blind-retry. |
 | `DominaiteAuthException` | 401/403. `Code` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
-| `DominaiteTransportException` | Network failure, timeout, or 5xx (`MERCHANT_API_UNAVAILABLE`). | Retry with the **same** idempotency key. `IsRetryable` is true only here. |
-| `DominaiteApiException` | Any other rejecting or unexpected response, including a 3xx. `Code` carries the API's reason when it sent one, e.g. `IDEMPOTENCY_KEY_REQUIRED` on a 400. | Inspect `HttpStatus` and `Code`. A 422 means an idempotency key was replayed with a different body - use a fresh key. A 404 from `GetStatusAsync` is an unknown transaction id. |
+| `DominaiteTransportException` | Network failure, timeout, or a 5xx without a gateway code, including one whose body is an HTML error page from a proxy. | Retry with the **same** idempotency key. `IsRetryable` is true only here. |
+| `DominaiteChargeException` | `ChargePaymentMethodAsync` got an error code instead of a charge: 409, 422, 502 or 503. Carries `Charge`, `TransactionId` and `RawResult`. | Branch on `Code` (see [Stored payment methods](#stored-payment-methods-recurring)). `CHARGE_OUTCOME_UNKNOWN` carries the `TransactionId` to poll; never retry it under a new key. |
+| `DominaiteRevokeException` | `RevokePaymentMethodAsync` was refused: 502 `UPSTREAM_CONTRACT_ERROR` or 503 `MERCHANT_API_UNAVAILABLE`. Nothing changed. | Retry later on 503; contact support on 502. |
+| `DominaiteApiException` | Any other rejecting or unexpected response, including a 3xx. `Code` carries the API's reason when it sent one, e.g. `IDEMPOTENCY_KEY_REQUIRED` on a 400, `PAYMENT_METHOD_NOT_FOUND` on a charge 404. | Inspect `HttpStatus` and `Code`. A 404 from `GetStatusAsync` is an unknown transaction id. |
 | `DominaiteValidationException` | Bad arguments (non-positive amount, missing field, malformed key id). | Fix the call; nothing was sent. |
 
 Failures from a session create also carry `IdempotencyKey`, so a log line tells you which key to
