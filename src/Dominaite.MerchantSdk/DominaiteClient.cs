@@ -7,6 +7,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace Dominaite.MerchantSdk;
 
@@ -36,8 +37,14 @@ public sealed class DominaiteClient : IDisposable
     /// <summary>The credentials-and-clock smoke test. Creates nothing.</summary>
     public const string PingPath = "/merchant-api/ping";
 
+    /// <summary>
+    /// The stored payment methods path. POST <c>PaymentMethodsPath/{id}/charges</c> charges a
+    /// stored card; DELETE <c>PaymentMethodsPath/{id}</c> revokes it.
+    /// </summary>
+    public const string PaymentMethodsPath = "/merchant-api/payment-methods";
+
     /// <summary>This SDK's version, reported in the User-Agent.</summary>
-    public const string Version = "0.2.0";
+    public const string Version = "0.3.0";
 
     private const string KeyIdPrefix = "dmk_";
     private const string SecretPrefix = "dms_";
@@ -54,6 +61,16 @@ public sealed class DominaiteClient : IDisposable
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
+
+    /// <summary>
+    /// A payment method id is one path segment and nothing else: it is interpolated into the
+    /// signed path, so anything that could split, escape or extend that path is refused before
+    /// signing.
+    /// </summary>
+    private static readonly Regex PaymentMethodIdPattern = new("^[A-Za-z0-9_-]{1,100}$", RegexOptions.CultureInvariant);
+
+    /// <summary>What a 204 unwraps to: a payload with nothing in it.</summary>
+    private static readonly JsonElement EmptyPayload = ParseEmptyObject();
 
     private readonly string _keyId;
     private readonly string _secret;
@@ -138,7 +155,7 @@ public sealed class DominaiteClient : IDisposable
     public async Task<PingResponse> PingAsync(CancellationToken cancellationToken = default)
     {
         // GET signs an EMPTY idempotency key and an EMPTY body.
-        var payload = await this.SendAsync(HttpMethod.Get, PingPath, string.Empty, string.Empty, cancellationToken)
+        var payload = await this.RequestAsync(HttpMethod.Get, PingPath, string.Empty, string.Empty, cancellationToken)
             .ConfigureAwait(false);
 
         var ping = Deserialize<PingResponse>(payload, "ping");
@@ -173,7 +190,7 @@ public sealed class DominaiteClient : IDisposable
         JsonElement payload;
         try
         {
-            payload = await this.SendAsync(HttpMethod.Post, SessionsPath, body, idempotencyKey, cancellationToken)
+            payload = await this.RequestAsync(HttpMethod.Post, SessionsPath, body, idempotencyKey, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (DominaiteException error)
@@ -277,6 +294,11 @@ public sealed class DominaiteClient : IDisposable
     /// <param name="cancellationToken">Cancels the call.</param>
     /// <returns>The status projection.</returns>
     /// <exception cref="DominaiteApiException">HTTP 404 for an unknown or foreign transaction id.</exception>
+    /// <remarks>
+    /// <see cref="CheckoutStatus.StoredPaymentMethod"/> is the card kept on file when the session
+    /// asked for one with <see cref="CheckoutSessionRequest.SaveCard"/> and the payment was
+    /// approved; null otherwise.
+    /// </remarks>
     public async Task<CheckoutStatus> GetStatusAsync(
         string transactionId,
         CancellationToken cancellationToken = default)
@@ -293,12 +315,147 @@ public sealed class DominaiteClient : IDisposable
         // GET signs an EMPTY idempotency key and an EMPTY body, and sends no Idempotency-Key
         // header.
         var path = $"{SessionsPath}/{normalized}";
-        var payload = await this.SendAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
+        var payload = await this.RequestAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
             .ConfigureAwait(false);
 
         var status = Deserialize<CheckoutStatus>(payload, "status");
         status.Raw = payload;
         return status;
+    }
+
+    /// <summary>
+    /// Charges a stored card off-session: no widget, no payer present.
+    /// </summary>
+    /// <remarks>
+    /// Returns the charge on HTTP 201 (200 on a durable replay of the same key) and on HTTP 402
+    /// alike. A decline is a result, not an exception: the 402 charge has
+    /// <see cref="ChargeStatuses.Failed"/> and a <see cref="PaymentMethodCharge.DeclineClass"/> to
+    /// branch on. <see cref="ChargeStatuses.Pending"/> is not terminal: poll
+    /// <see cref="GetStatusAsync"/> with the charge's transaction id. What throws
+    /// <see cref="DominaiteChargeException"/> is the gateway answering with a code instead of a
+    /// charge (409, 422, 502, 503); <c>CHARGE_OUTCOME_UNKNOWN</c> carries the charge row to poll
+    /// and must never be retried under a new key.
+    /// </remarks>
+    /// <param name="paymentMethodId">The <see cref="StoredPaymentMethod.Id"/> read off a paid session's status.</param>
+    /// <param name="request">
+    /// The charge parameters. When <see cref="ChargeRequest.IdempotencyKey"/> is null, the client
+    /// generates one and writes it back onto the request so you can log it and reuse it on a retry.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The charge result. Check <see cref="PaymentMethodCharge.IsPaid"/>.</returns>
+    /// <exception cref="DominaiteValidationException">Bad arguments; nothing was sent.</exception>
+    /// <exception cref="DominaiteChargeException">The gateway answered with an error code; inspect Code.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaiteApiException">404 (PAYMENT_METHOD_NOT_FOUND) for a method that is not yours, a 400 validation rejection, or an unexpected response.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure, or a 5xx without a gateway code; retry with the same key.</exception>
+    public async Task<PaymentMethodCharge> ChargePaymentMethodAsync(
+        string paymentMethodId,
+        ChargeRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paymentMethodId);
+        ArgumentNullException.ThrowIfNull(request);
+
+        var id = NormalizePaymentMethodId(paymentMethodId);
+        var idempotencyKey = ResolveIdempotencyKey(request);
+        var body = SerializeBody(request);
+        var path = $"{PaymentMethodsPath}/{id}/charges";
+
+        ApiReply reply;
+        try
+        {
+            reply = await this.SendAsync(HttpMethod.Post, path, body, idempotencyKey, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (DominaiteException error)
+        {
+            error.IdempotencyKey = idempotencyKey;
+            throw;
+        }
+
+        // 201 (200 on a durable replay): the charge was placed, whatever its status. 402: the
+        // provider declined; the envelope says success=false but the charge is right there,
+        // status failed with its decline class, so it is a result, not an exception.
+        var charge = reply.Charge();
+        if (charge is not null && (reply.Success || reply.Status == 402))
+        {
+            return charge;
+        }
+
+        if (reply.Status >= 400)
+        {
+            var code = reply.ErrorCode;
+            if (code is not null && !IsGenericFailureStatus(reply.Status))
+            {
+                throw new DominaiteChargeException(
+                    reply.Status,
+                    code,
+                    reply.ErrorMessage ?? "The charge was refused.",
+                    charge,
+                    reply.Envelope)
+                {
+                    IdempotencyKey = idempotencyKey,
+                };
+            }
+
+            var rejection = reply.Rejection();
+            rejection.IdempotencyKey = idempotencyKey;
+            throw rejection;
+        }
+
+        throw new DominaiteApiException(reply.Status, null, "The Dominaite API answered the charge without a charge body.")
+        {
+            IdempotencyKey = idempotencyKey,
+        };
+    }
+
+    /// <summary>
+    /// Revokes a stored card: the saved credential is deleted at the payment provider and the
+    /// method's status becomes <see cref="StoredPaymentMethodStatuses.Revoked"/>. Any later charge
+    /// on it is refused with <c>PAYMENT_METHOD_NOT_ACTIVE</c>.
+    /// </summary>
+    /// <remarks>
+    /// A signed DELETE with an empty idempotency key and an empty body, the same recipe as GET.
+    /// Resolves on HTTP 204, and again on an already revoked method, so retrying a timed-out
+    /// revoke is safe. When the gateway refuses, nothing changed and the
+    /// <see cref="DominaiteRevokeException"/> says why.
+    /// </remarks>
+    /// <param name="paymentMethodId">The <see cref="StoredPaymentMethod.Id"/> to revoke.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>A task that completes once the method is revoked.</returns>
+    /// <exception cref="DominaiteValidationException">The id is not one path segment; nothing was sent.</exception>
+    /// <exception cref="DominaiteRevokeException">502 UPSTREAM_CONTRACT_ERROR or 503 MERCHANT_API_UNAVAILABLE; nothing changed.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 404 (VALIDATION_ERROR) for an unknown or foreign payment method id.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure, or a 5xx without a gateway code.</exception>
+    public async Task RevokePaymentMethodAsync(
+        string paymentMethodId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paymentMethodId);
+
+        var id = NormalizePaymentMethodId(paymentMethodId);
+        var path = $"{PaymentMethodsPath}/{id}";
+
+        // DELETE signs an EMPTY idempotency key and an EMPTY body, and sends no Idempotency-Key
+        // header, exactly like GET.
+        var reply = await this.SendAsync(HttpMethod.Delete, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        if (reply.Status < 400)
+        {
+            return;
+        }
+
+        var code = reply.ErrorCode;
+        if (code is not null && !IsGenericFailureStatus(reply.Status))
+        {
+            throw new DominaiteRevokeException(
+                reply.Status,
+                code,
+                reply.ErrorMessage ?? "The revoke was refused.",
+                reply.Envelope);
+        }
+
+        throw reply.Rejection();
     }
 
     /// <summary>Releases the HttpClient this instance created for itself.</summary>
@@ -319,10 +476,38 @@ public sealed class DominaiteClient : IDisposable
         => $"DominaiteClient {{ KeyId = {this._keyId}, BaseUrl = {this.BaseUrl}, Secret = [REDACTED] }}";
 
     /// <summary>
-    /// Signs and sends one call, and maps the response onto the error taxonomy. The body and the
-    /// idempotency key are both empty for GET.
+    /// Signs and sends one call, and maps the response onto the error taxonomy:
+    /// <see cref="SendAsync"/> plus the generic rejection for any 4xx or 5xx. The unwrapped
+    /// <c>data</c> comes back on success (an empty object for a 204). The body and the idempotency
+    /// key are both empty for GET and DELETE.
     /// </summary>
-    private async Task<JsonElement> SendAsync(
+    private async Task<JsonElement> RequestAsync(
+        HttpMethod method,
+        string path,
+        string body,
+        string idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        var reply = await this.SendAsync(method, path, body, idempotencyKey, cancellationToken).ConfigureAwait(false);
+        if (reply.Status >= 400)
+        {
+            throw reply.Rejection();
+        }
+
+        return reply.Payload;
+    }
+
+    /// <summary>
+    /// Signs and sends one call, and parses whatever came back into an <see cref="ApiReply"/>.
+    /// </summary>
+    /// <remarks>
+    /// Only what no route can use is thrown here: transport failures, a redirect, a 401/403, and
+    /// a body that is not a JSON object (a 5xx of that kind is a retryable transport failure;
+    /// anything else is an API error). Every other status comes back as a reply, so the payment
+    /// method routes can read a 402 decline or a coded 502 as the typed answers they are, while
+    /// <see cref="RequestAsync"/> rejects them generically.
+    /// </remarks>
+    private async Task<ApiReply> SendAsync(
         HttpMethod method,
         string path,
         string body,
@@ -351,13 +536,14 @@ public sealed class DominaiteClient : IDisposable
         message.Headers.TryAddWithoutValidation("X-Timestamp", timestamp);
         message.Headers.TryAddWithoutValidation("X-Signature", signature);
 
-        // No Idempotency-Key header on GET, matching the empty key it signed.
+        // No Idempotency-Key header on GET or DELETE, matching the empty key they signed.
         if (idempotencyKey.Length > 0)
         {
             message.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
         }
 
-        if (method != HttpMethod.Get)
+        // GET and DELETE signed an empty body and send none.
+        if (body.Length > 0)
         {
             // The exact bytes that were hashed above.
             message.Content = new StringContent(body, new UTF8Encoding(false));
@@ -401,14 +587,10 @@ public sealed class DominaiteClient : IDisposable
                     "The Dominaite API returned an unexpected redirect response; the Dominaite API never redirects.");
             }
 
-            // Branch on the status BEFORE parsing: a 5xx from a proxy is often an HTML error page
-            // or an empty body, and that is still a retryable transport failure rather than a
-            // parse error.
-            if (status >= 500)
+            // A revoke answers 204 with no body, and no body is not a parse failure.
+            if (status == (int)HttpStatusCode.NoContent)
             {
-                throw new DominaiteTransportException(
-                    $"The Dominaite API is unavailable (HTTP {status}); retry with the same idempotency key.",
-                    status);
+                return new ApiReply(status, EmptyPayload);
             }
 
             string raw;
@@ -423,65 +605,162 @@ public sealed class DominaiteClient : IDisposable
                     innerException: error);
             }
 
-            return UnwrapEnvelope(status, raw);
+            var reply = new ApiReply(status, ParseEnvelope(status, raw));
+
+            // Credentials are refused the same way on every route.
+            if (status is 401 or 403)
+            {
+                throw reply.Rejection();
+            }
+
+            return reply;
         }
     }
 
     /// <summary>
-    /// Unwraps the gateway envelope and turns a non-2xx into the right error.
+    /// Parses the body into the envelope object, classifying a body that is not one on the STATUS.
     /// </summary>
     /// <remarks>
-    /// Three shapes reach here and only one of them is nested: create answers
-    /// <c>{ success, data: { success, checkout } }</c>, while the status and ping reads answer
-    /// <c>{ success, data: { ...fields } }</c> with no inner <c>success</c>. So this only ever
-    /// unwraps <c>data</c>; branching on the inner <c>success</c> belongs to the caller that knows
-    /// which shape it asked for. Treating a missing <c>success</c> as false would mark every paid
-    /// order unpaid.
+    /// A 502/503/504 of that kind comes from a load balancer or a cold function host, not from the
+    /// API, so the body is an HTML error page or empty; reading it as "a non-JSON response" would
+    /// make a non-retryable API error out of what is plainly a retryable outage. A JSON 5xx is
+    /// different: that is the gateway itself talking, and the payment method routes need its code.
     /// </remarks>
-    private static JsonElement UnwrapEnvelope(int httpStatus, string raw)
+    private static JsonElement ParseEnvelope(int httpStatus, string raw)
     {
-        JsonElement envelope;
+        JsonElement envelope = default;
+        var isObject = false;
         try
         {
             using var document = JsonDocument.Parse(raw);
-            envelope = document.RootElement.Clone();
+            if (document.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                envelope = document.RootElement.Clone();
+                isObject = true;
+            }
         }
         catch (JsonException)
         {
-            throw new DominaiteApiException(httpStatus, null, "The Dominaite API returned a non-JSON response.");
+            // Classified below on the status, like a body of the wrong kind.
         }
 
-        if (envelope.ValueKind != JsonValueKind.Object)
+        if (isObject)
         {
-            throw new DominaiteApiException(httpStatus, null, "The Dominaite API returned a non-JSON response.");
+            return envelope;
         }
 
-        var payload = envelope.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object
-            ? data
-            : envelope;
-
-        if (httpStatus < 400)
+        if (httpStatus >= 500)
         {
-            return payload;
-        }
-
-        var code = StringField(payload, "errorCode")
-            ?? (envelope.TryGetProperty("error", out var error) ? StringField(error, "code") : null);
-        var message = StringField(payload, "errorMessage")
-            ?? (envelope.TryGetProperty("error", out var errorDetail) ? StringField(errorDetail, "message") : null);
-
-        if (httpStatus is 401 or 403)
-        {
-            throw new DominaiteAuthException(
-                code ?? "UNAUTHORIZED",
-                message ?? "Authentication failed - check your key id, secret, and server clock.",
+            throw new DominaiteTransportException(
+                $"The Dominaite API is unavailable (HTTP {httpStatus}); retry with the same idempotency key.",
                 httpStatus);
         }
 
-        // The code is the whole point of a validation rejection (IDEMPOTENCY_KEY_REQUIRED on a
-        // 400), so it travels with the error instead of being flattened into a status the caller
-        // cannot branch on.
-        throw new DominaiteApiException(httpStatus, code, message ?? "Request rejected");
+        throw new DominaiteApiException(httpStatus, null, "The Dominaite API returned a non-JSON response.");
+    }
+
+    /// <summary>
+    /// The statuses that stay generic on every route: input validation, credentials, an id that
+    /// is not yours, and rate limiting. A coded answer outside this set is the gateway describing
+    /// a payment method outcome, which the charge and revoke routes surface as
+    /// <see cref="DominaiteChargeException"/> and <see cref="DominaiteRevokeException"/>.
+    /// </summary>
+    private static bool IsGenericFailureStatus(int status) => status is 400 or 401 or 403 or 404 or 429;
+
+    /// <summary>
+    /// One parsed gateway answer: the HTTP status and the envelope as sent.
+    /// </summary>
+    /// <remarks>
+    /// Three shapes arrive and only one of them is nested: create answers
+    /// <c>{ success, data: { success, checkout } }</c>, while the status and ping reads answer
+    /// <c>{ success, data: { ...fields } }</c> with no inner <c>success</c>. So <see cref="Payload"/>
+    /// only ever unwraps <c>data</c>; branching on the inner <c>success</c> belongs to the caller
+    /// that knows which shape it asked for. Treating a missing <c>success</c> as false would mark
+    /// every paid order unpaid.
+    /// </remarks>
+    private readonly struct ApiReply
+    {
+        public ApiReply(int status, JsonElement envelope)
+        {
+            this.Status = status;
+            this.Envelope = envelope;
+        }
+
+        public int Status { get; }
+
+        /// <summary>The whole body: <c>{ success, data?, error?, metadata }</c>.</summary>
+        public JsonElement Envelope { get; }
+
+        /// <summary>The envelope's own success flag, true only when it is literally true.</summary>
+        public bool Success
+            => this.Envelope.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.True;
+
+        /// <summary>
+        /// <c>data</c> when it is an object, else null: the gateway omits null fields on the wire,
+        /// so a bodiless error has no <c>data</c> at all.
+        /// </summary>
+        public JsonElement? Data
+            => this.Envelope.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object
+                ? data
+                : null;
+
+        /// <summary>The unwrapped <c>data</c>, or the envelope itself when there is none.</summary>
+        public JsonElement Payload => this.Data ?? this.Envelope;
+
+        /// <summary>
+        /// The gateway's machine-readable code: <c>error.code</c> on the standard envelope, or
+        /// <c>errorCode</c> inside <c>data</c> on the create route's refusals.
+        /// </summary>
+        public string? ErrorCode
+            => (this.Envelope.TryGetProperty("error", out var error) ? StringField(error, "code") : null)
+                ?? StringField(this.Payload, "errorCode");
+
+        public string? ErrorMessage
+            => (this.Envelope.TryGetProperty("error", out var error) ? StringField(error, "message") : null)
+                ?? StringField(this.Payload, "errorMessage");
+
+        /// <summary>
+        /// The charge row in <c>data</c>, on a 201, a 402 and the coded 502s that attach one. Null
+        /// when <c>data</c> is missing or carries no charge id.
+        /// </summary>
+        public PaymentMethodCharge? Charge()
+        {
+            if (this.Data is not { } data || StringField(data, "chargeId") is null)
+            {
+                return null;
+            }
+
+            var charge = Deserialize<PaymentMethodCharge>(data, "charge");
+            charge.Raw = data;
+            return charge;
+        }
+
+        /// <summary>
+        /// The generic error for a 4xx or 5xx: a 5xx is a retryable transport failure, a 401/403
+        /// an auth failure, and any other 4xx a <see cref="DominaiteApiException"/> that keeps the
+        /// code (IDEMPOTENCY_KEY_REQUIRED on a 400 is the whole point of the rejection).
+        /// </summary>
+        public DominaiteException Rejection()
+        {
+            if (this.Status >= 500)
+            {
+                return new DominaiteTransportException(
+                    $"The Dominaite API is unavailable (HTTP {this.Status}); retry with the same idempotency key.",
+                    this.Status);
+            }
+
+            var code = this.ErrorCode;
+            var message = this.ErrorMessage;
+            if (this.Status is 401 or 403)
+            {
+                return new DominaiteAuthException(
+                    code ?? "UNAUTHORIZED",
+                    message ?? "Authentication failed - check your key id, secret, and server clock.",
+                    this.Status);
+            }
+
+            return new DominaiteApiException(this.Status, code, message ?? "Request rejected");
+        }
     }
 
     /// <summary>
@@ -491,26 +770,7 @@ public sealed class DominaiteClient : IDisposable
     /// </summary>
     private static string SerializeBody(CheckoutSessionRequest request)
     {
-        if (request.Amount <= 0)
-        {
-            throw new DominaiteValidationException(
-                "Amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR)");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.Currency))
-        {
-            throw new DominaiteValidationException("Missing required parameter: Currency");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.OrderReference))
-        {
-            throw new DominaiteValidationException("Missing required parameter: OrderReference");
-        }
-
-        if (request.OrderReference.Length > 100)
-        {
-            throw new DominaiteValidationException("OrderReference must be at most 100 characters");
-        }
+        ValidateMoneyParams(request.Amount, request.Currency, request.OrderReference);
 
         var node = JsonSerializer.SerializeToNode(request, JsonOptions)!.AsObject();
         foreach (var extra in request.Extra)
@@ -524,26 +784,85 @@ public sealed class DominaiteClient : IDisposable
         return node.ToJsonString(JsonOptions);
     }
 
-    private static string ResolveIdempotencyKey(CheckoutSessionRequest request)
+    /// <summary>
+    /// Validates a charge and returns the exact body bytes that get both signed and sent, in
+    /// contract order: amount, currency, orderReference, then description when there is one.
+    /// </summary>
+    private static string SerializeBody(ChargeRequest request)
     {
-        if (request.IdempotencyKey is null)
+        ValidateMoneyParams(request.Amount, request.Currency, request.OrderReference);
+        return JsonSerializer.Serialize(request, JsonOptions);
+    }
+
+    private static void ValidateMoneyParams(long amount, string? currency, string? orderReference)
+    {
+        if (amount <= 0)
         {
-            var generated = NewIdempotencyKey();
-            request.IdempotencyKey = generated;
-            return generated;
+            throw new DominaiteValidationException(
+                "Amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR)");
         }
 
-        if (string.IsNullOrWhiteSpace(request.IdempotencyKey))
+        if (string.IsNullOrWhiteSpace(currency))
+        {
+            throw new DominaiteValidationException("Missing required parameter: Currency");
+        }
+
+        if (string.IsNullOrWhiteSpace(orderReference))
+        {
+            throw new DominaiteValidationException("Missing required parameter: OrderReference");
+        }
+
+        if (orderReference.Length > 100)
+        {
+            throw new DominaiteValidationException("OrderReference must be at most 100 characters");
+        }
+    }
+
+    private static string ResolveIdempotencyKey(CheckoutSessionRequest request)
+    {
+        var key = NormalizeIdempotencyKey(request.IdempotencyKey);
+        request.IdempotencyKey = key;
+        return key;
+    }
+
+    private static string ResolveIdempotencyKey(ChargeRequest request)
+    {
+        var key = NormalizeIdempotencyKey(request.IdempotencyKey);
+        request.IdempotencyKey = key;
+        return key;
+    }
+
+    /// <summary>A null key is generated; a supplied key is checked, never rewritten.</summary>
+    private static string NormalizeIdempotencyKey(string? provided)
+    {
+        if (provided is null)
+        {
+            return NewIdempotencyKey();
+        }
+
+        if (string.IsNullOrWhiteSpace(provided))
         {
             throw new DominaiteValidationException("IdempotencyKey must not be empty");
         }
 
-        if (request.IdempotencyKey.Length > 100)
+        if (provided.Length > 100)
         {
             throw new DominaiteValidationException("IdempotencyKey must be at most 100 characters");
         }
 
-        return request.IdempotencyKey;
+        return provided;
+    }
+
+    private static string NormalizePaymentMethodId(string paymentMethodId)
+    {
+        var trimmed = paymentMethodId.Trim();
+        if (!PaymentMethodIdPattern.IsMatch(trimmed))
+        {
+            throw new DominaiteValidationException(
+                "paymentMethodId must be the StoredPaymentMethod id from GetStatusAsync (letters, digits, _ or -, at most 100 characters)");
+        }
+
+        return trimmed;
     }
 
     private static T Deserialize<T>(JsonElement payload, string what)
@@ -562,6 +881,12 @@ public sealed class DominaiteClient : IDisposable
         {
             throw new DominaiteApiException(200, null, $"The Dominaite API returned an unexpected {what} response.");
         }
+    }
+
+    private static JsonElement ParseEmptyObject()
+    {
+        using var document = JsonDocument.Parse("{}");
+        return document.RootElement.Clone();
     }
 
     private static string? StringField(JsonElement value, string field)

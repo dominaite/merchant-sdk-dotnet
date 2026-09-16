@@ -121,9 +121,9 @@ public sealed class DominaiteAuthException : DominaiteException
 
 /// <summary>
 /// The API answered, but with a rejecting or unexpected response. A 400 carries a validation
-/// code such as <c>IDEMPOTENCY_KEY_REQUIRED</c>; a 422 means an idempotency key was replayed
-/// with a different body; a 404 from <see cref="DominaiteClient.GetStatusAsync"/> means an
-/// unknown transaction id.
+/// code such as <c>IDEMPOTENCY_KEY_REQUIRED</c>; a 404 from <see cref="DominaiteClient.GetStatusAsync"/>
+/// means an unknown transaction id, and from the payment method routes an id that is not yours
+/// (<c>PAYMENT_METHOD_NOT_FOUND</c> on a charge, <c>VALIDATION_ERROR</c> on a revoke).
 /// </summary>
 public sealed class DominaiteApiException : DominaiteException
 {
@@ -140,8 +140,155 @@ public sealed class DominaiteApiException : DominaiteException
 }
 
 /// <summary>
-/// A network-level failure, a timeout, or a 5xx. The request may or may not have reached the
-/// API, so retry WITH THE SAME idempotency key.
+/// The codes <see cref="DominaiteClient.ChargePaymentMethodAsync"/> throws as a
+/// <see cref="DominaiteChargeException"/>, in the gateway's own order. <c>CHARGE_DECLINED</c>
+/// (HTTP 402) is deliberately not one of them: a decline is a charge result with status
+/// <c>failed</c>, not an exception.
+/// </summary>
+public static class ChargeErrorCodes
+{
+    /// <summary>
+    /// HTTP 409: the method is revoked or expired; ask the customer for another card via a hosted
+    /// session with SaveCard.
+    /// </summary>
+    public const string PaymentMethodNotActive = "PAYMENT_METHOD_NOT_ACTIVE";
+
+    /// <summary>HTTP 409: a request with this key is still in flight; retry with the SAME key in a moment.</summary>
+    public const string DuplicateRequest = "DUPLICATE_REQUEST";
+
+    /// <summary>HTTP 422: same key, different body or method; a bug on your side.</summary>
+    public const string IdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED";
+
+    /// <summary>
+    /// HTTP 502: the provider gave no verdict and the charge MAY have happened. The charge row is
+    /// attached: poll <see cref="DominaiteClient.GetStatusAsync"/> with its transaction id or
+    /// wait for the webhook. Never retry under a new key.
+    /// </summary>
+    public const string ChargeOutcomeUnknown = "CHARGE_OUTCOME_UNKNOWN";
+
+    /// <summary>
+    /// HTTP 502: nothing was charged. The charge row is attached when one exists, absent when the
+    /// provider refused before one.
+    /// </summary>
+    public const string ChargeFailed = "CHARGE_FAILED";
+
+    /// <summary>HTTP 503: charges of stored methods are switched off; nothing was charged. Retry later with the SAME key.</summary>
+    public const string PaymentMethodChargesDisabled = "PAYMENT_METHOD_CHARGES_DISABLED";
+
+    /// <summary>HTTP 503: card payments are off right now; nothing was charged. Retry later with the SAME key.</summary>
+    public const string PaymentProcessingUnavailable = "PAYMENT_PROCESSING_UNAVAILABLE";
+
+    /// <summary>
+    /// The whole vocabulary, in the order the canonical contract lists it. An unlisted code still
+    /// arrives as a <see cref="DominaiteChargeException"/>.
+    /// </summary>
+    public static IReadOnlyList<string> All { get; } =
+    [
+        PaymentMethodNotActive,
+        DuplicateRequest,
+        IdempotencyKeyReused,
+        ChargeOutcomeUnknown,
+        ChargeFailed,
+        PaymentMethodChargesDisabled,
+        PaymentProcessingUnavailable,
+    ];
+}
+
+/// <summary>
+/// The gateway answered a charge with an error code instead of a charge result: HTTP 409, 422,
+/// 502 or 503. Branch on <see cref="DominaiteException.Code"/>; see <see cref="ChargeErrorCodes"/>.
+/// </summary>
+/// <remarks>
+/// The one that matters most is <c>CHARGE_OUTCOME_UNKNOWN</c>: the provider gave no verdict and
+/// the charge MAY have happened. <see cref="Charge"/> is present, so poll
+/// <see cref="DominaiteClient.GetStatusAsync"/> with <see cref="TransactionId"/> or wait for the
+/// webhook. Never retry under a new key. A decline is NOT this exception: HTTP 402 returns a
+/// charge whose status is <c>failed</c>. A 404 for an id that is not yours is
+/// <see cref="DominaiteApiException"/> with code <c>PAYMENT_METHOD_NOT_FOUND</c>, and a 5xx that
+/// carries no gateway code (an HTML page from a proxy) is <see cref="DominaiteTransportException"/>.
+/// </remarks>
+public sealed class DominaiteChargeException : DominaiteException
+{
+    /// <summary>Initializes a new instance of the <see cref="DominaiteChargeException"/> class.</summary>
+    /// <param name="httpStatus">The HTTP status code: 409, 422, 502 or 503.</param>
+    /// <param name="code">The machine-readable reason. See <see cref="ChargeErrorCodes"/>.</param>
+    /// <param name="message">The human-readable reason from the API.</param>
+    /// <param name="charge">The charge row the gateway attached to its answer, when it did.</param>
+    /// <param name="rawResult">The whole envelope, as received.</param>
+    public DominaiteChargeException(
+        int httpStatus,
+        string code,
+        string message,
+        PaymentMethodCharge? charge,
+        JsonElement rawResult)
+        : base(message)
+    {
+        this.HttpStatus = httpStatus;
+        this.Code = code;
+        this.Charge = charge;
+        this.TransactionId = string.IsNullOrEmpty(charge?.TransactionId) ? null : charge.TransactionId;
+        this.RawResult = rawResult;
+    }
+
+    /// <summary>The charge row the gateway attached to its answer, when it did.</summary>
+    public PaymentMethodCharge? Charge { get; }
+
+    /// <summary>Shortcut for <c>Charge.TransactionId</c>, for polling <see cref="DominaiteClient.GetStatusAsync"/>.</summary>
+    public string? TransactionId { get; }
+
+    /// <summary>The whole envelope exactly as received, for fields the typed surface does not model.</summary>
+    public JsonElement RawResult { get; }
+}
+
+/// <summary>
+/// The codes <see cref="DominaiteClient.RevokePaymentMethodAsync"/> throws as a
+/// <see cref="DominaiteRevokeException"/>, in the gateway's own order.
+/// </summary>
+public static class RevokeErrorCodes
+{
+    /// <summary>
+    /// HTTP 502: the provider refused the deletion for a reason a retry will not fix; contact
+    /// support with the payment method id.
+    /// </summary>
+    public const string UpstreamContractError = "UPSTREAM_CONTRACT_ERROR";
+
+    /// <summary>HTTP 503: the provider is unavailable or throttling; retry later.</summary>
+    public const string MerchantApiUnavailable = "MERCHANT_API_UNAVAILABLE";
+
+    /// <summary>
+    /// The whole vocabulary, in the order the canonical contract lists it. An unlisted code still
+    /// arrives as a <see cref="DominaiteRevokeException"/>.
+    /// </summary>
+    public static IReadOnlyList<string> All { get; } = [UpstreamContractError, MerchantApiUnavailable];
+}
+
+/// <summary>
+/// The gateway refused to revoke a stored payment method: HTTP 502 or 503. Nothing changed either
+/// way; branch on <see cref="DominaiteException.Code"/>, see <see cref="RevokeErrorCodes"/>. An id
+/// that is not yours is still <see cref="DominaiteApiException"/> with HTTP 404.
+/// </summary>
+public sealed class DominaiteRevokeException : DominaiteException
+{
+    /// <summary>Initializes a new instance of the <see cref="DominaiteRevokeException"/> class.</summary>
+    /// <param name="httpStatus">The HTTP status code: 502 or 503.</param>
+    /// <param name="code">The machine-readable reason. See <see cref="RevokeErrorCodes"/>.</param>
+    /// <param name="message">The human-readable reason from the API.</param>
+    /// <param name="rawResult">The whole envelope, as received.</param>
+    public DominaiteRevokeException(int httpStatus, string code, string message, JsonElement rawResult)
+        : base(message)
+    {
+        this.HttpStatus = httpStatus;
+        this.Code = code;
+        this.RawResult = rawResult;
+    }
+
+    /// <summary>The whole envelope exactly as received, for fields the typed surface does not model.</summary>
+    public JsonElement RawResult { get; }
+}
+
+/// <summary>
+/// A network-level failure, a timeout, or a 5xx that carries no gateway code. The request may or
+/// may not have reached the API, so retry WITH THE SAME idempotency key.
 /// </summary>
 public sealed class DominaiteTransportException : DominaiteException
 {

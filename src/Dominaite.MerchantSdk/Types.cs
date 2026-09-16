@@ -56,6 +56,17 @@ public sealed class CheckoutSessionRequest
     public string? Description { get; set; }
 
     /// <summary>
+    /// Ask the payer to save their card for later off-session charges. Once the session is
+    /// paid, <see cref="CheckoutStatus.StoredPaymentMethod"/> carries the stored method to
+    /// charge with <see cref="DominaiteClient.ChargePaymentMethodAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// Null is omitted from the body, so a request that never sets it sends the exact bytes it
+    /// always did.
+    /// </remarks>
+    public bool? SaveCard { get; set; }
+
+    /// <summary>
     /// The idempotency key. It travels in the header and in the signature, never in the body.
     /// </summary>
     /// <remarks>
@@ -218,6 +229,21 @@ public sealed class CheckoutStatus
     /// </summary>
     public DateTimeOffset? ExpiresAt { get; set; }
 
+    /// <summary>
+    /// The card kept on file for this payment. Present once a session created with
+    /// <see cref="CheckoutSessionRequest.SaveCard"/> has been approved, and it stays present
+    /// after a revoke with status <c>revoked</c>; null (absent on the wire) until then, for
+    /// sessions without SaveCard, and for declined or abandoned ones. Persist
+    /// <see cref="StoredPaymentMethod.Id"/> against your customer; it is what
+    /// <see cref="DominaiteClient.ChargePaymentMethodAsync"/> takes.
+    /// </summary>
+    /// <remarks>
+    /// Not to be confused with the gateway's <c>paymentMethod</c> field, which is the string
+    /// category of how the payer paid (<c>card</c>, <c>wallet</c>, ...) and stays on
+    /// <see cref="Raw"/> untyped.
+    /// </remarks>
+    public StoredPaymentMethod? StoredPaymentMethod { get; set; }
+
     /// <summary>The unparsed payload, for fields this class does not model yet.</summary>
     [JsonIgnore]
     public JsonElement Raw { get; set; }
@@ -251,6 +277,213 @@ public sealed class CheckoutStatus
         TransactionStatuses.Cancelled => true,
         TransactionStatuses.Disputed => true,
         TransactionStatuses.Abandoned => true,
+        _ => false,
+    };
+}
+
+/// <summary>
+/// The stored payment method status wire values, as constants plus the enumerable
+/// <see cref="StoredPaymentMethodStatuses.All"/>.
+/// </summary>
+public static class StoredPaymentMethodStatuses
+{
+    /// <summary>The card can be charged. The ONLY value that means chargeable.</summary>
+    public const string Active = "active";
+
+    /// <summary>
+    /// What <see cref="DominaiteClient.RevokePaymentMethodAsync"/> leaves behind; a charge on it
+    /// is refused with <c>PAYMENT_METHOD_NOT_ACTIVE</c>.
+    /// </summary>
+    public const string Revoked = "revoked";
+
+    /// <summary>The card's expiry date has passed; a charge on it is refused.</summary>
+    public const string Expired = "expired";
+
+    /// <summary>The whole vocabulary, in the order the canonical contract lists it.</summary>
+    public static IReadOnlyList<string> All { get; } = [Active, Revoked, Expired];
+}
+
+/// <summary>
+/// A card kept on file by a session that asked for <see cref="CheckoutSessionRequest.SaveCard"/>.
+/// Display fields only: the card number never reaches this SDK, and the provider token behind
+/// the id never leaves the gateway. <see cref="Brand"/>, <see cref="Last4"/> and the expiry are
+/// null when the provider did not report them (the gateway omits null fields on the wire; the
+/// SDK reads absent as null).
+/// </summary>
+public sealed class StoredPaymentMethod
+{
+    /// <summary>
+    /// Opaque id: <c>pm_</c> followed by 32 hex characters, case-sensitive. The handle you charge
+    /// and revoke with; persist it against your customer.
+    /// </summary>
+    public string Id { get; set; } = string.Empty;
+
+    /// <summary>The card brand as the gateway reports it, e.g. "visa", "mastercard".</summary>
+    public string? Brand { get; set; }
+
+    /// <summary>The last four digits of the card number, for display only.</summary>
+    public string? Last4 { get; set; }
+
+    /// <summary>Expiry month, 1 to 12.</summary>
+    public int? ExpiryMonth { get; set; }
+
+    /// <summary>Expiry year, four digits, e.g. 2029.</summary>
+    public int? ExpiryYear { get; set; }
+
+    /// <summary>One of the <see cref="StoredPaymentMethodStatuses"/> values.</summary>
+    public string Status { get; set; } = string.Empty;
+
+    /// <summary>
+    /// True only for <c>active</c>. A status this SDK has never heard of reads as not chargeable,
+    /// so a value the API adds later cannot make you charge a card you should not.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsChargeable => string.Equals(this.Status, StoredPaymentMethodStatuses.Active, StringComparison.Ordinal);
+}
+
+/// <summary>
+/// The parameters for <see cref="DominaiteClient.ChargePaymentMethodAsync"/>: the same money
+/// fields as a session, charged off-session against a stored card.
+/// </summary>
+/// <remarks>
+/// Property order here is the JSON order on the wire, and the body is serialized exactly once:
+/// the bytes that are hashed for the signature are the bytes that are sent.
+/// </remarks>
+public sealed class ChargeRequest
+{
+    /// <summary>The amount in MINOR units: 2500 is 25.00 EUR. Integers only.</summary>
+    public long Amount { get; set; }
+
+    /// <summary>ISO 4217 currency, e.g. "EUR".</summary>
+    public string Currency { get; set; } = string.Empty;
+
+    /// <summary>Your own order id for this charge, at most 100 characters.</summary>
+    public string OrderReference { get; set; } = string.Empty;
+
+    /// <summary>Free-text description stored on the transaction.</summary>
+    public string? Description { get; set; }
+
+    /// <summary>
+    /// The idempotency key. Required and signed exactly like a session create: it travels in the
+    /// header and in the signature, never in the body.
+    /// </summary>
+    /// <remarks>
+    /// Leave it null and the client generates one per logical call and writes it back here. Pin
+    /// your own when you retry: a fresh key on a retry is the double-charge bug.
+    /// </remarks>
+    [JsonIgnore]
+    public string? IdempotencyKey { get; set; }
+}
+
+/// <summary>
+/// The charge status wire values, as constants plus the enumerable
+/// <see cref="ChargeStatuses.All"/>.
+/// </summary>
+public static class ChargeStatuses
+{
+    /// <summary>The card was charged. The ONLY value that means paid.</summary>
+    public const string Succeeded = "succeeded";
+
+    /// <summary>
+    /// The issuer declined (HTTP 402); see <see cref="PaymentMethodCharge.DeclineClass"/>.
+    /// </summary>
+    public const string Failed = "failed";
+
+    /// <summary>
+    /// Not decided yet. Not terminal: poll <see cref="DominaiteClient.GetStatusAsync"/> with the
+    /// charge's transaction id.
+    /// </summary>
+    public const string Pending = "pending";
+
+    /// <summary>An authorization voided before capture; no money moved.</summary>
+    public const string Cancelled = "cancelled";
+
+    /// <summary>The whole vocabulary, in the order the canonical contract lists it.</summary>
+    public static IReadOnlyList<string> All { get; } = [Succeeded, Failed, Pending, Cancelled];
+}
+
+/// <summary>
+/// Decline class wire values, on <see cref="PaymentMethodCharge.DeclineClass"/>. Coarse
+/// buckets that tell you what to do next; the provider's own reason is in
+/// <see cref="PaymentMethodCharge.DeclineCode"/>.
+/// </summary>
+public static class DeclineClasses
+{
+    /// <summary>Do not retry this card: stolen, closed, or the issuer said never.</summary>
+    public const string Hard = "hard";
+
+    /// <summary>Insufficient funds; retry in a few days.</summary>
+    public const string SoftFunds = "soft_funds";
+
+    /// <summary>
+    /// The issuer wants the payer present. Bring them back through a checkout session; an
+    /// off-session retry will fail the same way.
+    /// </summary>
+    public const string SoftScaRequired = "soft_sca_required";
+
+    /// <summary>A transient decline; retry later.</summary>
+    public const string SoftOther = "soft_other";
+
+    /// <summary>The whole vocabulary, in the order the canonical contract lists it.</summary>
+    public static IReadOnlyList<string> All { get; } = [Hard, SoftFunds, SoftScaRequired, SoftOther];
+}
+
+/// <summary>
+/// What <see cref="DominaiteClient.ChargePaymentMethodAsync"/> returns, for a placed charge
+/// (HTTP 201) and for a provider decline (HTTP 402, status <c>failed</c>) alike. A decline is a
+/// result, not an exception: check <see cref="IsPaid"/>, then branch on <see cref="DeclineClass"/>.
+/// Also carried on <see cref="DominaiteChargeException.Charge"/> when the gateway attached the
+/// charge row to its answer.
+/// </summary>
+public sealed class PaymentMethodCharge
+{
+    /// <summary>
+    /// <c>ch_</c> followed by 32 hex characters. Store it against the order; it is what support
+    /// asks for.
+    /// </summary>
+    public string ChargeId { get; set; } = string.Empty;
+
+    /// <summary>One of the <see cref="ChargeStatuses"/> values.</summary>
+    public string Status { get; set; } = string.Empty;
+
+    /// <summary>
+    /// One of the <see cref="DeclineClasses"/> values, set on a 402 decline; null everywhere else
+    /// (the SDK reads absent as null).
+    /// </summary>
+    public string? DeclineClass { get; set; }
+
+    /// <summary>
+    /// The provider's raw decline code, for your logs; branch on <see cref="DeclineClass"/>
+    /// instead. Null when DeclineClass is.
+    /// </summary>
+    public string? DeclineCode { get; set; }
+
+    /// <summary>
+    /// Dominaite's payment id for this charge. Store it against your order; poll status with it.
+    /// </summary>
+    public string TransactionId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The unwrapped charge object as the gateway sent it, for fields this class does not model
+    /// yet.
+    /// </summary>
+    [JsonIgnore]
+    public JsonElement Raw { get; set; }
+
+    /// <summary>True only for <c>succeeded</c>.</summary>
+    [JsonIgnore]
+    public bool IsPaid => string.Equals(this.Status, ChargeStatuses.Succeeded, StringComparison.Ordinal);
+
+    /// <summary>
+    /// False while the charge can still change, true once it cannot. An unrecognised status is
+    /// reported as NOT terminal, so a status the API adds later keeps you polling.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsTerminal => this.Status switch
+    {
+        ChargeStatuses.Succeeded => true,
+        ChargeStatuses.Failed => true,
+        ChargeStatuses.Cancelled => true,
         _ => false,
     };
 }
