@@ -77,6 +77,7 @@ public class ContractTests
         Amount = 8440,
         Currency = "EUR",
         OrderReference = "order-1042",
+        IdempotencyKey = "checkout-order-1042-8440-EUR",
     };
 
     private const string PaymentMethodId = "pm_0123456789abcdef0123456789abcdef";
@@ -86,6 +87,7 @@ public class ContractTests
         Amount = 2500,
         Currency = "EUR",
         OrderReference = "order-1043",
+        IdempotencyKey = "charge-order-1043-2500-EUR",
     };
 
     /// <summary>
@@ -188,6 +190,43 @@ public class ContractTests
 
         Assert.False(status.IsPaid);
         Assert.False(status.IsTerminal);
+    }
+
+    /// <summary>
+    /// A dispute resolves later, so it is not an outcome to close the order on. Not paid either,
+    /// although the money did move.
+    /// </summary>
+    [Fact]
+    public void DisputedIsNeitherPaidNorTerminal()
+    {
+        var payload = JsonNode.Parse(Endpoint("getStatus").GetProperty("example").GetRawText())!;
+        payload["status"] = TransactionStatuses.Disputed;
+
+        var status = JsonSerializer.Deserialize<CheckoutStatus>(payload.ToJsonString(), ReadOptions)!;
+
+        Assert.False(status.IsPaid);
+        Assert.False(status.IsTerminal);
+    }
+
+    /// <summary>The whole vocabulary, pinned: which statuses end polling and which do not.</summary>
+    [Fact]
+    public void TheTerminalSetIsExactlyTheFinishedOutcomes()
+    {
+        string[] terminal =
+        [
+            TransactionStatuses.Succeeded,
+            TransactionStatuses.Failed,
+            TransactionStatuses.Refunded,
+            TransactionStatuses.PartiallyRefunded,
+            TransactionStatuses.Cancelled,
+            TransactionStatuses.Abandoned,
+        ];
+
+        foreach (var value in TransactionStatuses.All)
+        {
+            var status = new CheckoutStatus { Status = value };
+            Assert.True(terminal.Contains(value) == status.IsTerminal, value);
+        }
     }
 
     [Fact]
@@ -346,7 +385,7 @@ public class ContractTests
                 () => client.CreateCheckoutSessionAsync(Request()));
 
             Assert.Equal(code, error.Code);
-            Assert.False(error.IsRetryable);
+            Assert.Equal(code == ErrorCodes.PaymentProcessingUnavailable, error.IsRetryable);
         }
     }
 
@@ -391,6 +430,12 @@ public class ContractTests
         Assert.Equal(Strings(contract.GetProperty("declineClassVocabulary")), DeclineClasses.All);
         Assert.Equal(Strings(contract.GetProperty("chargeErrorCodes")), ChargeErrorCodes.All);
         Assert.Equal(Strings(contract.GetProperty("revokeErrorCodes")), RevokeErrorCodes.All);
+    }
+
+    [Fact]
+    public void TheSessionRefusalCodesAreExactlyTheContracts()
+    {
+        Assert.Equal(Strings(Contract().GetProperty("sessionRefusalErrorCodes")), ErrorCodes.SessionRefusals);
     }
 
     [Fact]
@@ -589,7 +634,8 @@ public class ContractTests
                 var error = await Assert.ThrowsAsync<DominaiteChargeException>(
                     () => client.ChargePaymentMethodAsync(PaymentMethodId, Charge()));
 
-                Assert.False(error.IsRetryable, label);
+                // Card payments coming back is the one charge answer that retrying fixes.
+                Assert.True(error.IsRetryable == (code == ChargeErrorCodes.PaymentProcessingUnavailable), label);
                 Assert.Equal(httpStatus, error.HttpStatus);
                 Assert.Equal(code, error.Code);
                 Assert.Equal(body.GetProperty("error").GetProperty("message").GetString(), error.Message);

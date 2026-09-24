@@ -67,12 +67,14 @@ public sealed class CheckoutSessionRequest
     public bool? SaveCard { get; set; }
 
     /// <summary>
-    /// The idempotency key. It travels in the header and in the signature, never in the body.
+    /// The idempotency key. Required. It travels in the header and in the signature, never in the
+    /// body.
     /// </summary>
     /// <remarks>
-    /// Leave it null and the client generates one per logical call and writes it back here, so
-    /// you can log it and reuse it. Reusing a key never opens a second payment; it comes back as
-    /// a replay refusal naming the transaction it collided with.
+    /// Derive it from the order with <see cref="IdempotencyKeys.ForOrder"/>: the same order at the
+    /// same amount then replays the same session on a reload or a retry, and a changed amount gets
+    /// a new key. Null or blank is rejected before anything is sent. Reusing a key never opens a
+    /// second payment.
     /// </remarks>
     [JsonIgnore]
     public string? IdempotencyKey { get; set; }
@@ -155,7 +157,9 @@ public static class TransactionStatuses
     /// <summary>The payment was cancelled before completion.</summary>
     public const string Cancelled = "cancelled";
 
-    /// <summary>The payment is disputed.</summary>
+    /// <summary>
+    /// The payment is disputed (a chargeback is open). Not terminal: a dispute resolves later.
+    /// </summary>
     public const string Disputed = "disputed";
 
     /// <summary>Authorized, awaiting capture. The payer HAS paid.</summary>
@@ -264,8 +268,11 @@ public sealed class CheckoutStatus
     /// False while the payment can still change, true once it cannot.
     /// </summary>
     /// <remarks>
-    /// An unrecognised status is reported as NOT terminal, so a status the API adds later makes
-    /// you keep polling rather than silently close an order that is still open.
+    /// <c>pending</c>, <c>processing</c>, <c>requires_capture</c> and <c>disputed</c> are not
+    /// terminal. A dispute resolves later, so keep watching it; <see cref="IsPaid"/> is false for
+    /// it too, although the money did move. An unrecognised status is also reported as NOT
+    /// terminal, so a status the API adds later makes you keep polling rather than silently close
+    /// an order that is still open.
     /// </remarks>
     [JsonIgnore]
     public bool IsTerminal => this.Status switch
@@ -275,7 +282,6 @@ public sealed class CheckoutStatus
         TransactionStatuses.Refunded => true,
         TransactionStatuses.PartiallyRefunded => true,
         TransactionStatuses.Cancelled => true,
-        TransactionStatuses.Disputed => true,
         TransactionStatuses.Abandoned => true,
         _ => false,
     };
@@ -364,12 +370,13 @@ public sealed class ChargeRequest
     public string? Description { get; set; }
 
     /// <summary>
-    /// The idempotency key. Required and signed exactly like a session create: it travels in the
+    /// The idempotency key. Required, and signed exactly like a session create: it travels in the
     /// header and in the signature, never in the body.
     /// </summary>
     /// <remarks>
-    /// Leave it null and the client generates one per logical call and writes it back here. Pin
-    /// your own when you retry: a fresh key on a retry is the double-charge bug.
+    /// Derive it from the order with <see cref="IdempotencyKeys.ForOrder"/> (scope "charge"), and
+    /// send the same key when you retry: a fresh key on a retry is the double-charge bug. Null or
+    /// blank is rejected before anything is sent.
     /// </remarks>
     [JsonIgnore]
     public string? IdempotencyKey { get; set; }

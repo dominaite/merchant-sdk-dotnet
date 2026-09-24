@@ -10,14 +10,11 @@ Targets `net8.0` (so it runs on .NET 8, 9 and 10). Zero runtime NuGet dependenci
 
 ## Install
 
-Nothing is published to NuGet yet - the package id is still an owner decision, so the project
-ships with `IsPackable=false` and there is no publish workflow. Until then, clone and reference
-the project:
-
 ```sh
-git clone https://github.com/dominaite/merchant-sdk-dotnet
-dotnet add YourApp.csproj reference merchant-sdk-dotnet/src/Dominaite.MerchantSdk/Dominaite.MerchantSdk.csproj
+dotnet add package Dominaite.MerchantSdk
 ```
+
+Upgrading from 0.x: see [CHANGELOG.md](CHANGELOG.md). The idempotency key is now required.
 
 To work on the SDK itself:
 
@@ -90,6 +87,9 @@ var session = await client.CreateCheckoutSessionAsync(new CheckoutSessionRequest
     Currency = "EUR",
     OrderReference = "order-1042",
     Customer = new Customer { FirstName = "Ana", Email = "ana@example.com" },
+
+    // Required. Same order + same amount = same key, so a reload or a retry replays this session.
+    IdempotencyKey = IdempotencyKeys.ForOrder("checkout", "order-1042", 2500, "EUR"),
 });
 
 // Store session.TransactionId against your order, then hand CashierKey and CashierToken to the
@@ -201,19 +201,51 @@ network. The amount is locked server-side - what you pass here is what gets char
 the browser can change it. Compute it from your own catalog, never from the request body your page
 sent you.
 
-The minor-unit exponent follows ISO 4217 per currency: EUR has 2 decimals, JPY has 0 (so `2500` is
-JPY 2,500), KWD has 3. Never hardcode a x100 conversion.
+The minor-unit exponent depends on the currency: EUR has 2 decimals, JPY has 0 (so `2500` is
+JPY 2,500), KWD has 3. **HUF has 0 on the Dominaite gateway** (whole forints, so `1500` is 1,500
+HUF), which is not ISO 4217's 2. Never hardcode a x100 conversion. `MinorUnits` does it for you,
+with the gateway's exponents:
+
+```csharp
+long amount = MinorUnits.From(0.30m, "EUR");     // 30
+long yen = MinorUnits.From(2500m, "JPY");        // 2500
+int decimals = MinorUnits.Exponent("KWD");       // 3
+```
+
+It takes `decimal`, never `double` (`0.1 + 0.2` in floating point is not `0.3`). A price written
+with more decimals than the currency has throws `DominaiteValidationException` instead of being
+rounded, even when the extra digits are zeros (`25.000m` EUR, `2500.00m` JPY), and so does a
+negative price. ISK, KRW, OMR, JOD and TND throw as not supported: the gateway and ISO 4217
+disagree on them, and a wrong guess is a silent 100x or 10x charge. Any other currency the SDK has
+no exponent for throws too. `MinorUnits.Currencies` lists the ones it knows: EUR, USD, GBP, CAD,
+AUD, CHF, BGN, RON, PLN, CZK, SEK, DKK, NOK (2), JPY, HUF (0), BHD, KWD (3).
 
 ## Retries and double-charges
 
-Every `CreateCheckoutSessionAsync` call carries an idempotency key. Leave
-`CheckoutSessionRequest.IdempotencyKey` null and the client generates one per logical call and
-writes it back onto the request, so you can log it and reuse it.
+Every `CreateCheckoutSessionAsync` and `ChargePaymentMethodAsync` call needs an idempotency key,
+and the SDK never makes one up: a null or blank `IdempotencyKey` throws
+`DominaiteValidationException` before anything is sent. Derive the key from the order:
 
-`CreateCheckoutSessionWithRetryAsync` pins one key up front and reuses it across every attempt,
-retrying only transport failures (network errors, timeouts, and 5xx including
-`MERCHANT_API_UNAVAILABLE`). Refusals and authentication failures are thrown immediately - they
-will not change.
+```csharp
+var key = IdempotencyKeys.ForOrder("checkout", order.Id, amountMinor, "EUR");
+// "checkout-order-1042-2500-EUR"
+```
+
+The key is `{scope}-{orderId}-{amountMinor}-{CURRENCY}`. The same order at the same amount always
+gives the same key, so a page reload, a back button or a retried POST replays the session that
+already exists instead of opening a second payment. A changed amount or currency gives a new key,
+which is what the gateway wants: a reused key with a different amount is refused as
+`IDEMPOTENCY_KEY_REUSED`. Use a different scope per kind of call (`checkout` for sessions,
+`charge` for stored-card charges). The key is checked against the same rules as one you build
+yourself: 1 to 100 characters, visible ASCII only (`!` to `~`, so no spaces and no non-ASCII order
+ids).
+
+`CreateCheckoutSessionWithRetryAsync` sends the request's key on every attempt,
+retrying transport failures (network errors, timeouts, and 5xx including
+`MERCHANT_API_UNAVAILABLE`) and `PAYMENT_PROCESSING_UNAVAILABLE`, which means card payments are
+off for a moment and nothing was created. Every other refusal, storefront refusals and
+authentication failures are thrown immediately - they will not change. `IsRetryable` on any
+`DominaiteException` gives you the same answer for your own retry loop.
 
 ```csharp
 var session = await client.CreateCheckoutSessionWithRetryAsync(
@@ -221,11 +253,15 @@ var session = await client.CreateCheckoutSessionWithRetryAsync(
     new RetryOptions { Attempts = 3, BaseDelay = TimeSpan.FromMilliseconds(500) });
 ```
 
-Reusing the key is what makes the retry safe: a retried key never opens a second payment. What it
-does today is come back as a replay refusal - `DUPLICATE_REQUEST` if the earlier attempt's session
-is still open, `ALREADY_PROCESSED` if its payment completed - naming the transaction it collided
-with. So a retry after a timeout either succeeds (the first attempt never landed) or hands you the
-transaction id of the attempt that did, which you read back with `GetStatusAsync`:
+Reusing the key is what makes the retry safe: a retried key never opens a second payment. A clean
+replay of a session that is still open returns the ORIGINAL session, same `TransactionId` and
+cashier values, as an ordinary success. That is what makes a reload or a back button safe. When the
+earlier attempt has moved on, the replay is a refusal naming the transaction it collided with:
+`ALREADY_PROCESSED` if its payment took money, `PRIOR_ATTEMPT_FAILED` if it ended unpaid, and
+`DUPLICATE_REQUEST` while it is still unfinished but its session cannot be handed back (a
+concurrent attempt still writing it, for example). So a retry after a timeout either succeeds,
+with a new session or the original one, or hands you the transaction id to read back with
+`GetStatusAsync`:
 
 ```csharp
 try
@@ -273,6 +309,7 @@ var session = await client.CreateCheckoutSessionAsync(new CheckoutSessionRequest
     Currency = "EUR",
     OrderReference = "order-1042",
     SaveCard = true,
+    IdempotencyKey = IdempotencyKeys.ForOrder("checkout", "order-1042", 2500, "EUR"),
 });
 ```
 
@@ -293,8 +330,7 @@ if (status.StoredPaymentMethod is { IsChargeable: true } method)
 
 Charge the stored card later, off-session, with `ChargePaymentMethodAsync`. The call takes the
 same amount, currency and order reference as a session, and an idempotency key that is required
-and signed exactly like `CreateCheckoutSessionAsync` (one is generated and written back onto the
-request when you do not set one; pin your own when you retry).
+and signed exactly like `CreateCheckoutSessionAsync`. Send the same key when you retry.
 
 ```csharp
 try
@@ -305,6 +341,7 @@ try
         Currency = "EUR",
         OrderReference = "order-1043",
         Description = "Monthly plan",
+        IdempotencyKey = IdempotencyKeys.ForOrder("charge", "order-1043", 2500, "EUR"),
     });
 
     switch (charge.Status)
@@ -342,6 +379,7 @@ catch (DominaiteChargeException error)
             await AskForAnotherCardAsync();
             break;
         // Nothing was charged; retry later with the SAME key (error.IdempotencyKey).
+        // error.IsRetryable is true for PAYMENT_PROCESSING_UNAVAILABLE.
         case ChargeErrorCodes.DuplicateRequest:
         case ChargeErrorCodes.PaymentMethodChargesDisabled:
         case ChargeErrorCodes.PaymentProcessingUnavailable:
@@ -512,6 +550,9 @@ later makes you keep polling instead of closing an open order.
 capture, which is why `IsPaid` (settled) and `IsTerminal` (finished) both answer false for it. Never
 treat it as an abandoned order.
 
+`disputed` is not terminal either: a chargeback is open and resolves later, so keep watching it.
+`IsPaid` is false for it too, although the money did move.
+
 Call this from your server, never from the browser, and poll after the payer returns to you or on
 your order timeout - not in a tight loop, the endpoint is rate limited per key.
 
@@ -526,26 +567,53 @@ machine-readable string where there is one.
 | Exception | When | What to do |
 |---|---|---|
 | `DominaiteRefusalException` | HTTP 200 with `success: false`. Carries `TransactionId` and `RawResult`. | Branch on `Code`. Do not blind-retry. |
+| `DominaiteStorefrontException` | Session create refused because of the storefront: `STOREFRONT_NOT_WHITELISTED` or `STOREFRONT_INACTIVE` (409), `STOREFRONT_MISMATCH` (400, or 200 on a replay). Carries `TransactionId` on a replay and `RawResult`. | Configuration, not a retry. See [Storefront errors](#storefront-errors). |
 | `DominaiteAuthException` | 401/403. `Code` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
-| `DominaiteTransportException` | Network failure, timeout, or a 5xx without a gateway code, including one whose body is an HTML error page from a proxy. | Retry with the **same** idempotency key. `IsRetryable` is true only here. |
+| `DominaiteTransportException` | Network failure, timeout, or a 5xx on session create, status or ping, including one whose body is an HTML error page from a proxy. `Code` keeps the gateway's code when the 5xx carried one. | Retry with the **same** idempotency key. `IsRetryable` is always true here, and elsewhere only for `PAYMENT_PROCESSING_UNAVAILABLE`. |
 | `DominaiteChargeException` | `ChargePaymentMethodAsync` got an error code instead of a charge: 409, 422, 502 or 503. Carries `Charge`, `TransactionId` and `RawResult`. | Branch on `Code` (see [Stored payment methods](#stored-payment-methods-recurring)). `CHARGE_OUTCOME_UNKNOWN` carries the `TransactionId` to poll; never retry it under a new key. |
 | `DominaiteRevokeException` | `RevokePaymentMethodAsync` was refused: 502 `UPSTREAM_CONTRACT_ERROR` or 503 `MERCHANT_API_UNAVAILABLE`. Nothing changed. | Retry later on 503; contact support on 502. |
 | `DominaiteApiException` | Any other rejecting or unexpected response, including a 3xx. `Code` carries the API's reason when it sent one, e.g. `IDEMPOTENCY_KEY_REQUIRED` on a 400, `PAYMENT_METHOD_NOT_FOUND` on a charge 404. | Inspect `HttpStatus` and `Code`. A 404 from `GetStatusAsync` is an unknown transaction id. |
-| `DominaiteValidationException` | Bad arguments (non-positive amount, missing field, malformed key id). | Fix the call; nothing was sent. |
+| `DominaiteValidationException` | Bad arguments (non-positive amount, missing field, missing idempotency key, malformed key id). | Fix the call; nothing was sent. |
 
 Failures from a session create also carry `IdempotencyKey`, so a log line tells you which key to
 reuse.
 
 Refusal codes on `DominaiteRefusalException`:
 
-- `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later.
-- `DUPLICATE_REQUEST` - a session for this idempotency key is already open, or expired within the
-  last few minutes. Re-POST the same key shortly, never a fresh one.
+- `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; nothing was created. Retry
+  with the same key (`IsRetryable` is true, and the retry helper does it for you).
+- `DUPLICATE_REQUEST` - an attempt with this idempotency key is still unfinished but its session
+  cannot be handed back right now (still being written, or expired and not yet superseded).
+  Re-POST the same key shortly, never a fresh one. An open session that CAN be handed back is not
+  a refusal: the replay simply returns it.
 - `ALREADY_PROCESSED` - this idempotency key's payment already completed.
 - `PRIOR_ATTEMPT_FAILED` - the earlier attempt with this key failed; use a fresh key.
 - `IDEMPOTENCY_KEY_REUSED` - same key sent with a different body; use a fresh key.
 
-All five arrive as HTTP 200 with `success: false`, not as an HTTP error status.
+All five arrive as HTTP 200 with `success: false`, not as an HTTP error status. Every code has a
+constant on `ErrorCodes` (`ErrorCodes.AlreadyProcessed`, `ErrorCodes.DuplicateRequest`, ...), so
+branch on those rather than on string literals.
+
+### Storefront errors
+
+A storefront is one website under your merchant account. When a session is attributed to one,
+the gateway can refuse it before anything is created:
+
+- `STOREFRONT_NOT_WHITELISTED` (HTTP 409) - the site's domain is not whitelisted with the payment
+  provider yet. Ask Dominaite support to finish the whitelisting; retrying will not help.
+- `STOREFRONT_INACTIVE` (HTTP 409) - the storefront was deactivated or deleted.
+- `STOREFRONT_MISMATCH` (HTTP 400) - the API key is bound to a different storefront than the one
+  the request names. An idempotent replay says the same thing as HTTP 200 with `success: false`.
+
+All three arrive as `DominaiteStorefrontException`, whatever the status, and the retry helper
+never retries them:
+
+```csharp
+catch (DominaiteStorefrontException error) when (error.Code == ErrorCodes.StorefrontNotWhitelisted)
+{
+    // Show "payments are not available on this site yet" and alert your ops channel.
+}
+```
 
 ## Refunds, captures and voids
 

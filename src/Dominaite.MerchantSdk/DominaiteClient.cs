@@ -139,13 +139,6 @@ public sealed class DominaiteClient : IDisposable
     public string UserAgent { get; }
 
     /// <summary>
-    /// Mints a random v4 UUID for use as an idempotency key. Keys are per-payment, so a fresh one
-    /// is generated for every call that does not supply its own.
-    /// </summary>
-    /// <returns>A lowercase dashed UUID.</returns>
-    public static string NewIdempotencyKey() => Guid.NewGuid().ToString("D");
-
-    /// <summary>
     /// Verifies your credentials, your signing, and your clock without creating anything. Make
     /// this your first live call: a 401 here means the key id, the secret, or the signing, and a
     /// 503 means retry later - never both at once.
@@ -167,14 +160,14 @@ public sealed class DominaiteClient : IDisposable
     /// Opens a hosted checkout session for one payment.
     /// </summary>
     /// <param name="request">
-    /// The session parameters. When <see cref="CheckoutSessionRequest.IdempotencyKey"/> is null,
-    /// the client generates one and writes it back onto the request so you can log it and reuse
-    /// it on a retry.
+    /// The session parameters. <see cref="CheckoutSessionRequest.IdempotencyKey"/> is required:
+    /// derive it from the order with <see cref="IdempotencyKeys.ForOrder"/>.
     /// </param>
     /// <param name="cancellationToken">Cancels the call.</param>
     /// <returns>The created session. Hand its cashier values to the page that renders the widget.</returns>
-    /// <exception cref="DominaiteValidationException">Bad arguments; nothing was sent.</exception>
+    /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
     /// <exception cref="DominaiteRefusalException">The gateway refused the session; inspect Code.</exception>
+    /// <exception cref="DominaiteStorefrontException">The storefront is not whitelisted, inactive, or not the key's; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
     /// <exception cref="DominaiteApiException">An unexpected or rejecting response.</exception>
     /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry with the same key.</exception>
@@ -184,13 +177,13 @@ public sealed class DominaiteClient : IDisposable
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var idempotencyKey = ResolveIdempotencyKey(request);
+        var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
         var body = SerializeBody(request);
 
-        JsonElement payload;
+        ApiReply reply;
         try
         {
-            payload = await this.RequestAsync(HttpMethod.Post, SessionsPath, body, idempotencyKey, cancellationToken)
+            reply = await this.SendAsync(HttpMethod.Post, SessionsPath, body, idempotencyKey, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (DominaiteException error)
@@ -198,6 +191,19 @@ public sealed class DominaiteClient : IDisposable
             error.IdempotencyKey = idempotencyKey;
             throw;
         }
+
+        // The storefront codes arrive as a real HTTP 409 or 400, and a 400 would otherwise read as
+        // one more validation error. They are configuration, not input, so they get their own type.
+        if (reply.Status >= 400)
+        {
+            var rejection = reply.Status < 500 && reply.StorefrontRefusal() is { } storefront
+                ? storefront
+                : reply.Rejection();
+            rejection.IdempotencyKey = idempotencyKey;
+            throw rejection;
+        }
+
+        var payload = reply.Payload;
 
         // Create is the nested shape: an inner `success` next to `checkout`. The status and ping
         // reads are flat and have neither, which is why the branch lives here rather than in the
@@ -214,6 +220,14 @@ public sealed class DominaiteClient : IDisposable
             return session;
         }
 
+        // A storefront mismatch on an idempotent replay comes back as a 200 refusal; it is still
+        // the same storefront problem, so it is still the same exception.
+        if (reply.StorefrontRefusal() is { } replayStorefront)
+        {
+            replayStorefront.IdempotencyKey = idempotencyKey;
+            throw replayStorefront;
+        }
+
         // A replay refusal names the transaction the key collided with. Carry it so the caller
         // can reconcile with GetStatusAsync instead of minting a second payment for the same
         // order.
@@ -228,18 +242,21 @@ public sealed class DominaiteClient : IDisposable
     }
 
     /// <summary>
-    /// Creates a session, retrying transport failures only, with THE SAME idempotency key across
-    /// every attempt.
+    /// Creates a session, retrying transport failures and <c>PAYMENT_PROCESSING_UNAVAILABLE</c>,
+    /// with THE SAME idempotency key across every attempt.
     /// </summary>
     /// <remarks>
     /// Reusing the key is what makes the retry safe: a transport failure leaves you not knowing
     /// whether the request landed, and a retried key never opens a second payment. If the first
-    /// attempt did land, the retry comes back as a replay refusal
-    /// (<c>DUPLICATE_REQUEST</c> / <c>ALREADY_PROCESSED</c>) naming that transaction, which you
-    /// read back with <see cref="GetStatusAsync"/>. Generating a fresh key per attempt would be
-    /// exactly the double-charge bug this method exists to prevent, so the key is pinned once
-    /// before the first attempt and written onto the request.
-    /// Refusals and authentication failures are thrown immediately: they will not change.
+    /// attempt did land and its session is still open, the retry returns that ORIGINAL session.
+    /// If it has moved on, the retry comes back as a replay refusal (<c>ALREADY_PROCESSED</c>,
+    /// <c>PRIOR_ATTEMPT_FAILED</c>, <c>DUPLICATE_REQUEST</c>) naming that transaction, which you
+    /// read back with <see cref="GetStatusAsync"/>. A fresh key per attempt would be exactly the
+    /// double-charge bug this method exists to prevent, so every attempt sends the request's own
+    /// key, which is required.
+    /// <c>PAYMENT_PROCESSING_UNAVAILABLE</c> is retried too: it arrives as a refusal, but card
+    /// payments come back on their own and nothing was created. Every other refusal, storefront
+    /// refusals and authentication failures are thrown immediately: they will not change.
     /// </remarks>
     /// <param name="request">The session parameters.</param>
     /// <param name="options">Attempts and backoff. Defaults to 3 attempts, 500ms doubling.</param>
@@ -258,8 +275,8 @@ public sealed class DominaiteClient : IDisposable
             throw new DominaiteValidationException("Attempts must be at least 1");
         }
 
-        // Pinned once, up front, and written back onto the request so the caller can see it.
-        request.IdempotencyKey = ResolveIdempotencyKey(request);
+        // Checked once, up front, so a missing key fails before the first attempt.
+        IdempotencyKeys.Validate(request.IdempotencyKey);
 
         DominaiteException? lastError = null;
         for (var attempt = 0; attempt < options.Attempts; attempt++)
@@ -338,12 +355,12 @@ public sealed class DominaiteClient : IDisposable
     /// </remarks>
     /// <param name="paymentMethodId">The <see cref="StoredPaymentMethod.Id"/> read off a paid session's status.</param>
     /// <param name="request">
-    /// The charge parameters. When <see cref="ChargeRequest.IdempotencyKey"/> is null, the client
-    /// generates one and writes it back onto the request so you can log it and reuse it on a retry.
+    /// The charge parameters. <see cref="ChargeRequest.IdempotencyKey"/> is required: derive it
+    /// from the order with <see cref="IdempotencyKeys.ForOrder"/>.
     /// </param>
     /// <param name="cancellationToken">Cancels the call.</param>
     /// <returns>The charge result. Check <see cref="PaymentMethodCharge.IsPaid"/>.</returns>
-    /// <exception cref="DominaiteValidationException">Bad arguments; nothing was sent.</exception>
+    /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
     /// <exception cref="DominaiteChargeException">The gateway answered with an error code; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
     /// <exception cref="DominaiteApiException">404 (PAYMENT_METHOD_NOT_FOUND) for a method that is not yours, a 400 validation rejection, or an unexpected response.</exception>
@@ -357,7 +374,7 @@ public sealed class DominaiteClient : IDisposable
         ArgumentNullException.ThrowIfNull(request);
 
         var id = NormalizePaymentMethodId(paymentMethodId);
-        var idempotencyKey = ResolveIdempotencyKey(request);
+        var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
         var body = SerializeBody(request);
         var path = $"{PaymentMethodsPath}/{id}/charges";
 
@@ -736,6 +753,26 @@ public sealed class DominaiteClient : IDisposable
         }
 
         /// <summary>
+        /// A <see cref="DominaiteStorefrontException"/> when the answer carries one of the
+        /// <see cref="ErrorCodes.Storefront"/> codes, else null.
+        /// </summary>
+        public DominaiteStorefrontException? StorefrontRefusal()
+        {
+            var code = this.ErrorCode;
+            if (code is null || !ErrorCodes.Storefront.Contains(code, StringComparer.Ordinal))
+            {
+                return null;
+            }
+
+            return new DominaiteStorefrontException(
+                this.Status,
+                code,
+                this.ErrorMessage ?? "The storefront refused the checkout session.",
+                StringField(this.Payload, "transactionId"),
+                this.Envelope);
+        }
+
+        /// <summary>
         /// The generic error for a 4xx or 5xx: a 5xx is a retryable transport failure, a 401/403
         /// an auth failure, and any other 4xx a <see cref="DominaiteApiException"/> that keeps the
         /// code (IDEMPOTENCY_KEY_REQUIRED on a 400 is the whole point of the rejection).
@@ -746,7 +783,8 @@ public sealed class DominaiteClient : IDisposable
             {
                 return new DominaiteTransportException(
                     $"The Dominaite API is unavailable (HTTP {this.Status}); retry with the same idempotency key.",
-                    this.Status);
+                    this.Status,
+                    code: this.ErrorCode);
             }
 
             var code = this.ErrorCode;
@@ -816,41 +854,6 @@ public sealed class DominaiteClient : IDisposable
         {
             throw new DominaiteValidationException("OrderReference must be at most 100 characters");
         }
-    }
-
-    private static string ResolveIdempotencyKey(CheckoutSessionRequest request)
-    {
-        var key = NormalizeIdempotencyKey(request.IdempotencyKey);
-        request.IdempotencyKey = key;
-        return key;
-    }
-
-    private static string ResolveIdempotencyKey(ChargeRequest request)
-    {
-        var key = NormalizeIdempotencyKey(request.IdempotencyKey);
-        request.IdempotencyKey = key;
-        return key;
-    }
-
-    /// <summary>A null key is generated; a supplied key is checked, never rewritten.</summary>
-    private static string NormalizeIdempotencyKey(string? provided)
-    {
-        if (provided is null)
-        {
-            return NewIdempotencyKey();
-        }
-
-        if (string.IsNullOrWhiteSpace(provided))
-        {
-            throw new DominaiteValidationException("IdempotencyKey must not be empty");
-        }
-
-        if (provided.Length > 100)
-        {
-            throw new DominaiteValidationException("IdempotencyKey must be at most 100 characters");
-        }
-
-        return provided;
     }
 
     private static string NormalizePaymentMethodId(string paymentMethodId)

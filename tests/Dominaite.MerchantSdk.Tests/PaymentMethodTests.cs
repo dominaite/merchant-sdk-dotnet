@@ -136,6 +136,7 @@ public class PaymentMethodTests
             Amount = 2500,
             Currency = "EUR",
             OrderReference = "order-1042",
+            IdempotencyKey = "00000000-0000-4000-8000-000000000001",
         });
 
         Assert.Equal(
@@ -257,7 +258,7 @@ public class PaymentMethodTests
     }
 
     [Fact]
-    public async Task ChargeGeneratesAKeyWritesItBackAndSendsTheDescriptionLast()
+    public async Task ChargeSendsItsKeyAndTheDescriptionLast()
     {
         using var server = new MockServer(ChargeCreated());
         using var client = ClientFor(server);
@@ -268,15 +269,13 @@ public class PaymentMethodTests
             Currency = "EUR",
             OrderReference = "order-1043",
             Description = "Monthly plan",
+            IdempotencyKey = IdempotencyKeys.ForOrder("charge", "order-1043", 2500, "EUR"),
         };
-        Assert.Null(request.IdempotencyKey);
 
         await client.ChargePaymentMethodAsync(PaymentMethodId, request);
 
         var sent = server.LastRequest;
-        Assert.NotNull(request.IdempotencyKey);
-        Assert.True(Guid.TryParseExact(request.IdempotencyKey, "D", out _));
-        Assert.Equal(request.IdempotencyKey, sent.Header("Idempotency-Key"));
+        Assert.Equal("charge-order-1043-2500-EUR", sent.Header("Idempotency-Key"));
         Assert.Equal(
             """{"amount":2500,"currency":"EUR","orderReference":"order-1043","description":"Monthly plan"}""",
             sent.Body);
@@ -404,7 +403,7 @@ public class PaymentMethodTests
         var error = await Assert.ThrowsAsync<DominaiteChargeException>(
             () => client.ChargePaymentMethodAsync(PaymentMethodId, Charge()));
 
-        Assert.False(error.IsRetryable);
+        Assert.Equal(code == ChargeErrorCodes.PaymentProcessingUnavailable, error.IsRetryable);
         Assert.Equal(status, error.HttpStatus);
         Assert.Equal(code, error.Code);
         Assert.Equal("refused", error.Message);
@@ -485,11 +484,13 @@ public class PaymentMethodTests
 
         var bad = new[]
         {
-            new ChargeRequest { Amount = 0, Currency = "EUR", OrderReference = "order-1" },
-            new ChargeRequest { Amount = -500, Currency = "EUR", OrderReference = "order-1" },
-            new ChargeRequest { Amount = 2500, Currency = " ", OrderReference = "order-1" },
-            new ChargeRequest { Amount = 2500, Currency = "EUR", OrderReference = "" },
-            new ChargeRequest { Amount = 2500, Currency = "EUR", OrderReference = new string('x', 101) },
+            new ChargeRequest { Amount = 0, Currency = "EUR", OrderReference = "order-1", IdempotencyKey = ChargeKey },
+            new ChargeRequest { Amount = -500, Currency = "EUR", OrderReference = "order-1", IdempotencyKey = ChargeKey },
+            new ChargeRequest { Amount = 2500, Currency = " ", OrderReference = "order-1", IdempotencyKey = ChargeKey },
+            new ChargeRequest { Amount = 2500, Currency = "EUR", OrderReference = "", IdempotencyKey = ChargeKey },
+            new ChargeRequest { Amount = 2500, Currency = "EUR", OrderReference = new string('x', 101), IdempotencyKey = ChargeKey },
+            new ChargeRequest { Amount = 2500, Currency = "EUR", OrderReference = "order-1" },
+            new ChargeRequest { Amount = 2500, Currency = "EUR", OrderReference = "order-1", IdempotencyKey = "" },
             new ChargeRequest { Amount = 2500, Currency = "EUR", OrderReference = "order-1", IdempotencyKey = " " },
             new ChargeRequest { Amount = 2500, Currency = "EUR", OrderReference = "order-1", IdempotencyKey = new string('k', 101) },
         };

@@ -35,10 +35,13 @@ public abstract class DominaiteException : Exception
     public string? IdempotencyKey { get; internal set; }
 
     /// <summary>
-    /// True only for <see cref="DominaiteTransportException"/>, the one kind that is safe to
-    /// retry, and only with the SAME idempotency key.
+    /// True when retrying can help, and only with the SAME idempotency key: every
+    /// <see cref="DominaiteTransportException"/>, and any answer coded
+    /// <c>PAYMENT_PROCESSING_UNAVAILABLE</c> (a 200 refusal on session create, a 503 on a
+    /// stored-card charge), since card payments come back on their own.
     /// </summary>
-    public virtual bool IsRetryable => false;
+    public virtual bool IsRetryable
+        => string.Equals(this.Code, ErrorCodes.PaymentProcessingUnavailable, StringComparison.Ordinal);
 }
 
 /// <summary>
@@ -61,7 +64,10 @@ public sealed class DominaiteValidationException : DominaiteException
 /// <c>PRIOR_ATTEMPT_FAILED</c>, <c>IDEMPOTENCY_KEY_REUSED</c>).
 /// </summary>
 /// <remarks>
-/// Never blind-retry a refusal. It will not change on its own.
+/// Never blind-retry a refusal: it will not change on its own. The one exception is
+/// <c>PAYMENT_PROCESSING_UNAVAILABLE</c>, which reports <see cref="DominaiteException.IsRetryable"/>
+/// and which <see cref="DominaiteClient.CreateCheckoutSessionWithRetryAsync"/> retries with the
+/// same key.
 /// </remarks>
 public sealed class DominaiteRefusalException : DominaiteException
 {
@@ -137,6 +143,114 @@ public sealed class DominaiteApiException : DominaiteException
         this.HttpStatus = httpStatus;
         this.Code = code;
     }
+}
+
+/// <summary>
+/// The gateway codes a checkout integration branches on, as constants. The stored-card codes live
+/// in <see cref="ChargeErrorCodes"/> and <see cref="RevokeErrorCodes"/>.
+/// </summary>
+public static class ErrorCodes
+{
+    /// <summary>
+    /// HTTP 409 on session create: the storefront's domain is not whitelisted with the payment
+    /// provider yet. Nothing was created. Not retryable until the whitelisting is done; arrives as
+    /// <see cref="DominaiteStorefrontException"/>.
+    /// </summary>
+    public const string StorefrontNotWhitelisted = "STOREFRONT_NOT_WHITELISTED";
+
+    /// <summary>
+    /// HTTP 409 on session create: the storefront was deactivated or deleted. Arrives as
+    /// <see cref="DominaiteStorefrontException"/>.
+    /// </summary>
+    public const string StorefrontInactive = "STOREFRONT_INACTIVE";
+
+    /// <summary>
+    /// HTTP 400 on session create: the API key is bound to one storefront and the request named
+    /// another. Arrives as <see cref="DominaiteStorefrontException"/>.
+    /// </summary>
+    public const string StorefrontMismatch = "STOREFRONT_MISMATCH";
+
+    /// <summary>
+    /// Session refusal: this idempotency key's payment already moved money (paid, refunded,
+    /// disputed, or held awaiting capture). Read it back with the named transaction.
+    /// </summary>
+    public const string AlreadyProcessed = "ALREADY_PROCESSED";
+
+    /// <summary>Session refusal: the earlier attempt with this key ended failed, cancelled or abandoned. Use a fresh key.</summary>
+    public const string PriorAttemptFailed = "PRIOR_ATTEMPT_FAILED";
+
+    /// <summary>
+    /// An attempt with this key is still unfinished but cannot be handed back right now (still
+    /// being written, or in flight on a charge). Re-send the SAME key shortly, never a fresh one.
+    /// An open session that can be handed back is not refused: the replay returns it.
+    /// </summary>
+    public const string DuplicateRequest = "DUPLICATE_REQUEST";
+
+    /// <summary>
+    /// Card payments are off right now; nothing was created or charged. HTTP 200 on session
+    /// create, 503 on a stored-card charge. Retryable with the SAME key.
+    /// </summary>
+    public const string PaymentProcessingUnavailable = "PAYMENT_PROCESSING_UNAVAILABLE";
+
+    /// <summary>The key was already used with a different body (amount, currency, storefront). Use a fresh key.</summary>
+    public const string IdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED";
+
+    /// <summary>The session refusal codes, in the order the canonical contract lists them.</summary>
+    public static IReadOnlyList<string> SessionRefusals { get; } =
+    [
+        PaymentProcessingUnavailable,
+        DuplicateRequest,
+        AlreadyProcessed,
+        IdempotencyKeyReused,
+        PriorAttemptFailed,
+    ];
+
+    /// <summary>The codes <see cref="DominaiteClient.CreateCheckoutSessionAsync"/> throws as a <see cref="DominaiteStorefrontException"/>.</summary>
+    public static IReadOnlyList<string> Storefront { get; } =
+    [
+        StorefrontNotWhitelisted,
+        StorefrontInactive,
+        StorefrontMismatch,
+    ];
+}
+
+/// <summary>
+/// The gateway refused a session because of the storefront (the online location the session is
+/// attributed to): <c>STOREFRONT_NOT_WHITELISTED</c> and <c>STOREFRONT_INACTIVE</c> (HTTP 409) or
+/// <c>STOREFRONT_MISMATCH</c> (HTTP 400, or 200 on an idempotent replay). Nothing was created.
+/// </summary>
+/// <remarks>
+/// A retry will not help: this is configuration. Whitelisting the domain with the provider,
+/// reactivating the storefront or using the key bound to the right storefront is what fixes it.
+/// Branch on <see cref="DominaiteException.Code"/>, see <see cref="ErrorCodes.Storefront"/>.
+/// </remarks>
+public sealed class DominaiteStorefrontException : DominaiteException
+{
+    /// <summary>Initializes a new instance of the <see cref="DominaiteStorefrontException"/> class.</summary>
+    /// <param name="httpStatus">The HTTP status that carried the code.</param>
+    /// <param name="code">One of the <see cref="ErrorCodes.Storefront"/> codes.</param>
+    /// <param name="message">The human-readable reason from the API.</param>
+    /// <param name="transactionId">The payment an idempotent replay collided with, when named.</param>
+    /// <param name="rawResult">The whole envelope, as received.</param>
+    public DominaiteStorefrontException(
+        int httpStatus,
+        string code,
+        string message,
+        string? transactionId,
+        JsonElement rawResult)
+        : base(message)
+    {
+        this.HttpStatus = httpStatus;
+        this.Code = code;
+        this.TransactionId = transactionId;
+        this.RawResult = rawResult;
+    }
+
+    /// <summary>The payment the key collided with, on a replay refusal; null on a fresh mint.</summary>
+    public string? TransactionId { get; }
+
+    /// <summary>The whole envelope exactly as received, for fields the typed surface does not model.</summary>
+    public JsonElement RawResult { get; }
 }
 
 /// <summary>
@@ -287,19 +401,29 @@ public sealed class DominaiteRevokeException : DominaiteException
 }
 
 /// <summary>
-/// A network-level failure, a timeout, or a 5xx that carries no gateway code. The request may or
-/// may not have reached the API, so retry WITH THE SAME idempotency key.
+/// A network-level failure, a timeout, or a 5xx on a route with no typed error of its own. The
+/// request may or may not have reached the API, so retry WITH THE SAME idempotency key.
 /// </summary>
+/// <remarks>
+/// When the 5xx was the gateway talking (a JSON envelope rather than a proxy's HTML page), its
+/// code is kept on <see cref="DominaiteException.Code"/>, e.g. <c>MERCHANT_API_UNAVAILABLE</c>.
+/// </remarks>
 public sealed class DominaiteTransportException : DominaiteException
 {
     /// <summary>Initializes a new instance of the <see cref="DominaiteTransportException"/> class.</summary>
     /// <param name="message">What failed.</param>
     /// <param name="httpStatus">The 5xx status, when the failure was one.</param>
     /// <param name="innerException">The underlying cause, when there was one.</param>
-    public DominaiteTransportException(string message, int? httpStatus = null, Exception? innerException = null)
+    /// <param name="code">The gateway's code, when the 5xx carried one.</param>
+    public DominaiteTransportException(
+        string message,
+        int? httpStatus = null,
+        Exception? innerException = null,
+        string? code = null)
         : base(message, innerException)
     {
         this.HttpStatus = httpStatus;
+        this.Code = code;
     }
 
     /// <inheritdoc />
