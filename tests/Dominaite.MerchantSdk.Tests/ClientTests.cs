@@ -363,6 +363,53 @@ public class ClientTests
         Assert.Equal(request.IdempotencyKey, keys[0]);
     }
 
+    /// <summary>
+    /// On session create, PAYMENT_PROCESSING_UNAVAILABLE is a 200 refusal. Nothing was created and
+    /// card payments come back on their own, so the helper retries it with the same key, and the
+    /// same goes for a 503 that carries the code.
+    /// </summary>
+    [Fact]
+    public async Task RetryRetriesPaymentProcessingUnavailableWithTheSameKey()
+    {
+        const string unavailable = """
+            {"success":false,"errorCode":"PAYMENT_PROCESSING_UNAVAILABLE","errorMessage":"Card payments are unavailable right now."}
+            """;
+
+        using var server = new MockServer(
+            Reply.Enveloped(unavailable),
+            Reply.ErrorEnvelope(503, "PAYMENT_PROCESSING_UNAVAILABLE", "Card payments are unavailable right now."),
+            Reply.Enveloped(SuccessPayload));
+        using var client = ClientFor(server);
+
+        var request = Request();
+        var session = await client.CreateCheckoutSessionWithRetryAsync(
+            request,
+            new RetryOptions { Attempts = 3, BaseDelay = TimeSpan.FromMilliseconds(1) });
+
+        Assert.Equal("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0", session.TransactionId);
+        Assert.Equal(3, server.Requests.Count);
+        Assert.All(server.Requests, sent => Assert.Equal(request.IdempotencyKey, sent.Header("Idempotency-Key")));
+    }
+
+    [Fact]
+    public async Task RetryGivesUpOnPaymentProcessingUnavailableWithTheCodeIntact()
+    {
+        using var server = new MockServer(
+            Reply.ErrorEnvelope(503, "PAYMENT_PROCESSING_UNAVAILABLE", "Card payments are unavailable right now."),
+            Reply.ErrorEnvelope(503, "PAYMENT_PROCESSING_UNAVAILABLE", "Card payments are unavailable right now."));
+        using var client = ClientFor(server);
+
+        var error = await Assert.ThrowsAsync<DominaiteTransportException>(
+            () => client.CreateCheckoutSessionWithRetryAsync(
+                Request(),
+                new RetryOptions { Attempts = 2, BaseDelay = TimeSpan.FromMilliseconds(1) }));
+
+        Assert.Equal(ErrorCodes.PaymentProcessingUnavailable, error.Code);
+        Assert.Equal(503, error.HttpStatus);
+        Assert.True(error.IsRetryable);
+        Assert.Equal(2, server.Requests.Count);
+    }
+
     [Fact]
     public async Task RetryGivesUpWithTheLastTransportError()
     {

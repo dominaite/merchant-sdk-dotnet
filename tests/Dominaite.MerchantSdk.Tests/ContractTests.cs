@@ -348,7 +348,7 @@ public class ContractTests
                 () => client.CreateCheckoutSessionAsync(Request()));
 
             Assert.Equal(code, error.Code);
-            Assert.False(error.IsRetryable);
+            Assert.Equal(code == ErrorCodes.PaymentProcessingUnavailable, error.IsRetryable);
         }
     }
 
@@ -597,7 +597,8 @@ public class ContractTests
                 var error = await Assert.ThrowsAsync<DominaiteChargeException>(
                     () => client.ChargePaymentMethodAsync(PaymentMethodId, Charge()));
 
-                Assert.False(error.IsRetryable, label);
+                // Card payments coming back is the one charge answer that retrying fixes.
+                Assert.True(error.IsRetryable == (code == ChargeErrorCodes.PaymentProcessingUnavailable), label);
                 Assert.Equal(httpStatus, error.HttpStatus);
                 Assert.Equal(code, error.Code);
                 Assert.Equal(body.GetProperty("error").GetProperty("message").GetString(), error.Message);

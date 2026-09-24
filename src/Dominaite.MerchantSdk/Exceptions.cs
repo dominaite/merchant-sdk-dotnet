@@ -35,10 +35,13 @@ public abstract class DominaiteException : Exception
     public string? IdempotencyKey { get; internal set; }
 
     /// <summary>
-    /// True only for <see cref="DominaiteTransportException"/>, the one kind that is safe to
-    /// retry, and only with the SAME idempotency key.
+    /// True when retrying can help, and only with the SAME idempotency key: every
+    /// <see cref="DominaiteTransportException"/>, and any answer coded
+    /// <c>PAYMENT_PROCESSING_UNAVAILABLE</c> (a 200 refusal on session create, a 503 on a
+    /// stored-card charge), since card payments come back on their own.
     /// </summary>
-    public virtual bool IsRetryable => false;
+    public virtual bool IsRetryable
+        => string.Equals(this.Code, ErrorCodes.PaymentProcessingUnavailable, StringComparison.Ordinal);
 }
 
 /// <summary>
@@ -61,7 +64,10 @@ public sealed class DominaiteValidationException : DominaiteException
 /// <c>PRIOR_ATTEMPT_FAILED</c>, <c>IDEMPOTENCY_KEY_REUSED</c>).
 /// </summary>
 /// <remarks>
-/// Never blind-retry a refusal. It will not change on its own.
+/// Never blind-retry a refusal: it will not change on its own. The one exception is
+/// <c>PAYMENT_PROCESSING_UNAVAILABLE</c>, which reports <see cref="DominaiteException.IsRetryable"/>
+/// and which <see cref="DominaiteClient.CreateCheckoutSessionWithRetryAsync"/> retries with the
+/// same key.
 /// </remarks>
 public sealed class DominaiteRefusalException : DominaiteException
 {
@@ -394,19 +400,29 @@ public sealed class DominaiteRevokeException : DominaiteException
 }
 
 /// <summary>
-/// A network-level failure, a timeout, or a 5xx that carries no gateway code. The request may or
-/// may not have reached the API, so retry WITH THE SAME idempotency key.
+/// A network-level failure, a timeout, or a 5xx on a route with no typed error of its own. The
+/// request may or may not have reached the API, so retry WITH THE SAME idempotency key.
 /// </summary>
+/// <remarks>
+/// When the 5xx was the gateway talking (a JSON envelope rather than a proxy's HTML page), its
+/// code is kept on <see cref="DominaiteException.Code"/>, e.g. <c>MERCHANT_API_UNAVAILABLE</c>.
+/// </remarks>
 public sealed class DominaiteTransportException : DominaiteException
 {
     /// <summary>Initializes a new instance of the <see cref="DominaiteTransportException"/> class.</summary>
     /// <param name="message">What failed.</param>
     /// <param name="httpStatus">The 5xx status, when the failure was one.</param>
     /// <param name="innerException">The underlying cause, when there was one.</param>
-    public DominaiteTransportException(string message, int? httpStatus = null, Exception? innerException = null)
+    /// <param name="code">The gateway's code, when the 5xx carried one.</param>
+    public DominaiteTransportException(
+        string message,
+        int? httpStatus = null,
+        Exception? innerException = null,
+        string? code = null)
         : base(message, innerException)
     {
         this.HttpStatus = httpStatus;
+        this.Code = code;
     }
 
     /// <inheritdoc />

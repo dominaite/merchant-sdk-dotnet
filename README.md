@@ -227,9 +227,11 @@ which is what the gateway wants: a reused key with a different amount is refused
 yourself: at most 100 characters, no control characters.
 
 `CreateCheckoutSessionWithRetryAsync` sends the request's key on every attempt,
-retrying only transport failures (network errors, timeouts, and 5xx including
-`MERCHANT_API_UNAVAILABLE`). Refusals and authentication failures are thrown immediately - they
-will not change.
+retrying transport failures (network errors, timeouts, and 5xx including
+`MERCHANT_API_UNAVAILABLE`) and `PAYMENT_PROCESSING_UNAVAILABLE`, which means card payments are
+off for a moment and nothing was created. Every other refusal, storefront refusals and
+authentication failures are thrown immediately - they will not change. `IsRetryable` on any
+`DominaiteException` gives you the same answer for your own retry loop.
 
 ```csharp
 var session = await client.CreateCheckoutSessionWithRetryAsync(
@@ -359,6 +361,7 @@ catch (DominaiteChargeException error)
             await AskForAnotherCardAsync();
             break;
         // Nothing was charged; retry later with the SAME key (error.IdempotencyKey).
+        // error.IsRetryable is true for PAYMENT_PROCESSING_UNAVAILABLE.
         case ChargeErrorCodes.DuplicateRequest:
         case ChargeErrorCodes.PaymentMethodChargesDisabled:
         case ChargeErrorCodes.PaymentProcessingUnavailable:
@@ -545,7 +548,7 @@ machine-readable string where there is one.
 | `DominaiteRefusalException` | HTTP 200 with `success: false`. Carries `TransactionId` and `RawResult`. | Branch on `Code`. Do not blind-retry. |
 | `DominaiteStorefrontException` | Session create refused because of the storefront: `STOREFRONT_NOT_WHITELISTED` or `STOREFRONT_INACTIVE` (409), `STOREFRONT_MISMATCH` (400, or 200 on a replay). Carries `TransactionId` on a replay and `RawResult`. | Configuration, not a retry. See [Storefront errors](#storefront-errors). |
 | `DominaiteAuthException` | 401/403. `Code` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
-| `DominaiteTransportException` | Network failure, timeout, or a 5xx without a gateway code, including one whose body is an HTML error page from a proxy. | Retry with the **same** idempotency key. `IsRetryable` is true only here. |
+| `DominaiteTransportException` | Network failure, timeout, or a 5xx on session create, status or ping, including one whose body is an HTML error page from a proxy. `Code` keeps the gateway's code when the 5xx carried one. | Retry with the **same** idempotency key. `IsRetryable` is always true here, and elsewhere only for `PAYMENT_PROCESSING_UNAVAILABLE`. |
 | `DominaiteChargeException` | `ChargePaymentMethodAsync` got an error code instead of a charge: 409, 422, 502 or 503. Carries `Charge`, `TransactionId` and `RawResult`. | Branch on `Code` (see [Stored payment methods](#stored-payment-methods-recurring)). `CHARGE_OUTCOME_UNKNOWN` carries the `TransactionId` to poll; never retry it under a new key. |
 | `DominaiteRevokeException` | `RevokePaymentMethodAsync` was refused: 502 `UPSTREAM_CONTRACT_ERROR` or 503 `MERCHANT_API_UNAVAILABLE`. Nothing changed. | Retry later on 503; contact support on 502. |
 | `DominaiteApiException` | Any other rejecting or unexpected response, including a 3xx. `Code` carries the API's reason when it sent one, e.g. `IDEMPOTENCY_KEY_REQUIRED` on a 400, `PAYMENT_METHOD_NOT_FOUND` on a charge 404. | Inspect `HttpStatus` and `Code`. A 404 from `GetStatusAsync` is an unknown transaction id. |
@@ -556,7 +559,8 @@ reuse.
 
 Refusal codes on `DominaiteRefusalException`:
 
-- `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later.
+- `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; nothing was created. Retry
+  with the same key (`IsRetryable` is true, and the retry helper does it for you).
 - `DUPLICATE_REQUEST` - a session for this idempotency key is already open, or expired within the
   last few minutes. Re-POST the same key shortly, never a fresh one.
 - `ALREADY_PROCESSED` - this idempotency key's payment already completed.

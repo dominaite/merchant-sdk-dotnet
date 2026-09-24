@@ -403,7 +403,7 @@ public class PaymentMethodTests
         var error = await Assert.ThrowsAsync<DominaiteChargeException>(
             () => client.ChargePaymentMethodAsync(PaymentMethodId, Charge()));
 
-        Assert.False(error.IsRetryable);
+        Assert.Equal(code == ChargeErrorCodes.PaymentProcessingUnavailable, error.IsRetryable);
         Assert.Equal(status, error.HttpStatus);
         Assert.Equal(code, error.Code);
         Assert.Equal("refused", error.Message);

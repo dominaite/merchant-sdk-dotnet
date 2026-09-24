@@ -242,8 +242,8 @@ public sealed class DominaiteClient : IDisposable
     }
 
     /// <summary>
-    /// Creates a session, retrying transport failures only, with THE SAME idempotency key across
-    /// every attempt.
+    /// Creates a session, retrying transport failures and <c>PAYMENT_PROCESSING_UNAVAILABLE</c>,
+    /// with THE SAME idempotency key across every attempt.
     /// </summary>
     /// <remarks>
     /// Reusing the key is what makes the retry safe: a transport failure leaves you not knowing
@@ -253,7 +253,9 @@ public sealed class DominaiteClient : IDisposable
     /// read back with <see cref="GetStatusAsync"/>. A fresh key per attempt would be exactly the
     /// double-charge bug this method exists to prevent, so every attempt sends the request's own
     /// key, which is required.
-    /// Refusals and authentication failures are thrown immediately: they will not change.
+    /// <c>PAYMENT_PROCESSING_UNAVAILABLE</c> is retried too: it arrives as a refusal, but card
+    /// payments come back on their own and nothing was created. Every other refusal, storefront
+    /// refusals and authentication failures are thrown immediately: they will not change.
     /// </remarks>
     /// <param name="request">The session parameters.</param>
     /// <param name="options">Attempts and backoff. Defaults to 3 attempts, 500ms doubling.</param>
@@ -780,7 +782,8 @@ public sealed class DominaiteClient : IDisposable
             {
                 return new DominaiteTransportException(
                     $"The Dominaite API is unavailable (HTTP {this.Status}); retry with the same idempotency key.",
-                    this.Status);
+                    this.Status,
+                    code: this.ErrorCode);
             }
 
             var code = this.ErrorCode;
