@@ -180,8 +180,9 @@ public static class ErrorCodes
     public const string PriorAttemptFailed = "PRIOR_ATTEMPT_FAILED";
 
     /// <summary>
-    /// A request with this key is already open or in flight. Re-send the SAME key shortly, never a
-    /// fresh one.
+    /// An attempt with this key is still unfinished but cannot be handed back right now (still
+    /// being written, or in flight on a charge). Re-send the SAME key shortly, never a fresh one.
+    /// An open session that can be handed back is not refused: the replay returns it.
     /// </summary>
     public const string DuplicateRequest = "DUPLICATE_REQUEST";
 

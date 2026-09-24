@@ -248,8 +248,9 @@ public sealed class DominaiteClient : IDisposable
     /// <remarks>
     /// Reusing the key is what makes the retry safe: a transport failure leaves you not knowing
     /// whether the request landed, and a retried key never opens a second payment. If the first
-    /// attempt did land, the retry comes back as a replay refusal
-    /// (<c>DUPLICATE_REQUEST</c> / <c>ALREADY_PROCESSED</c>) naming that transaction, which you
+    /// attempt did land and its session is still open, the retry returns that ORIGINAL session.
+    /// If it has moved on, the retry comes back as a replay refusal (<c>ALREADY_PROCESSED</c>,
+    /// <c>PRIOR_ATTEMPT_FAILED</c>, <c>DUPLICATE_REQUEST</c>) naming that transaction, which you
     /// read back with <see cref="GetStatusAsync"/>. A fresh key per attempt would be exactly the
     /// double-charge bug this method exists to prevent, so every attempt sends the request's own
     /// key, which is required.

@@ -256,11 +256,15 @@ var session = await client.CreateCheckoutSessionWithRetryAsync(
     new RetryOptions { Attempts = 3, BaseDelay = TimeSpan.FromMilliseconds(500) });
 ```
 
-Reusing the key is what makes the retry safe: a retried key never opens a second payment. What it
-does today is come back as a replay refusal - `DUPLICATE_REQUEST` if the earlier attempt's session
-is still open, `ALREADY_PROCESSED` if its payment completed - naming the transaction it collided
-with. So a retry after a timeout either succeeds (the first attempt never landed) or hands you the
-transaction id of the attempt that did, which you read back with `GetStatusAsync`:
+Reusing the key is what makes the retry safe: a retried key never opens a second payment. A clean
+replay of a session that is still open returns the ORIGINAL session, same `TransactionId` and
+cashier values, as an ordinary success. That is what makes a reload or a back button safe. When the
+earlier attempt has moved on, the replay is a refusal naming the transaction it collided with:
+`ALREADY_PROCESSED` if its payment took money, `PRIOR_ATTEMPT_FAILED` if it ended unpaid, and
+`DUPLICATE_REQUEST` while it is still unfinished but its session cannot be handed back (a
+concurrent attempt still writing it, for example). So a retry after a timeout either succeeds,
+with a new session or the original one, or hands you the transaction id to read back with
+`GetStatusAsync`:
 
 ```csharp
 try
@@ -581,8 +585,10 @@ Refusal codes on `DominaiteRefusalException`:
 
 - `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; nothing was created. Retry
   with the same key (`IsRetryable` is true, and the retry helper does it for you).
-- `DUPLICATE_REQUEST` - a session for this idempotency key is already open, or expired within the
-  last few minutes. Re-POST the same key shortly, never a fresh one.
+- `DUPLICATE_REQUEST` - an attempt with this idempotency key is still unfinished but its session
+  cannot be handed back right now (still being written, or expired and not yet superseded).
+  Re-POST the same key shortly, never a fresh one. An open session that CAN be handed back is not
+  a refusal: the replay simply returns it.
 - `ALREADY_PROCESSED` - this idempotency key's payment already completed.
 - `PRIOR_ATTEMPT_FAILED` - the earlier attempt with this key failed; use a fresh key.
 - `IDEMPOTENCY_KEY_REUSED` - same key sent with a different body; use a fresh key.
