@@ -10,14 +10,11 @@ Targets `net8.0` (so it runs on .NET 8, 9 and 10). Zero runtime NuGet dependenci
 
 ## Install
 
-Nothing is published to NuGet yet - the package id is still an owner decision, so the project
-ships with `IsPackable=false` and there is no publish workflow. Until then, clone and reference
-the project:
-
 ```sh
-git clone https://github.com/dominaite/merchant-sdk-dotnet
-dotnet add YourApp.csproj reference merchant-sdk-dotnet/src/Dominaite.MerchantSdk/Dominaite.MerchantSdk.csproj
+dotnet add package Dominaite.MerchantSdk
 ```
+
+Upgrading from 0.x: see [CHANGELOG.md](CHANGELOG.md). The idempotency key is now required.
 
 To work on the SDK itself:
 

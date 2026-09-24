@@ -9,7 +9,7 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <AssemblyName>Dominaite.MerchantSdk</AssemblyName>
     <RootNamespace>Dominaite.MerchantSdk</RootNamespace>
-    <Version>0.3.0</Version>
+    <Version>1.0.0</Version>
     <Description>Server-side .NET client for the Dominaite merchant API (hosted checkout sessions and stored payment methods).</Description>
     <Authors>Dominaite</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
