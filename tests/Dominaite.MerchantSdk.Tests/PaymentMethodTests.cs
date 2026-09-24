@@ -203,8 +203,9 @@ public class PaymentMethodTests
     [Theory]
     [InlineData("revoked")]
     [InlineData("expired")]
+    [InlineData("retired")]
     [InlineData("frozen")]
-    public async Task ARevokedExpiredOrUnknownMethodIsNotChargeable(string value)
+    public async Task ARevokedExpiredRetiredOrUnknownMethodIsNotChargeable(string value)
     {
         using var server = new MockServer(StatusWithMethod(value));
         using var client = ClientFor(server);
@@ -634,7 +635,8 @@ public class PaymentMethodTests
     [Fact]
     public void TheVocabulariesAreExposedAsConstants()
     {
-        Assert.Equal(new[] { "active", "revoked", "expired" }, StoredPaymentMethodStatuses.All);
+        Assert.Equal(new[] { "active", "revoked", "expired", "retired" }, StoredPaymentMethodStatuses.All);
+        Assert.Equal(new[] { "hard_decline", "chargeback", "source_sale_reversed" }, StoredPaymentMethodRetiredReasons.All);
         Assert.Equal(new[] { "succeeded", "failed", "pending", "cancelled" }, ChargeStatuses.All);
         Assert.Equal(new[] { "hard", "soft_funds", "soft_sca_required", "soft_other" }, DeclineClasses.All);
         Assert.Equal(

@@ -314,8 +314,9 @@ var session = await client.CreateCheckoutSessionAsync(new CheckoutSessionRequest
 ```
 
 Once that session is paid, `GetStatusAsync` carries a `StoredPaymentMethod`: an id, the brand,
-the last four digits, the expiry and a status (`active`, `revoked` or `expired`). Persist the id
-against your customer. The full card number never reaches the SDK, and the provider token behind
+the last four digits, the expiry and a status (`active`, `revoked`, `expired` or `retired`).
+`retired` means the platform stopped the card on its own; `RetiredReason` says why
+(`hard_decline`, `chargeback` or `source_sale_reversed`). Persist the id against your customer. The full card number never reaches the SDK, and the provider token behind
 the id never leaves the gateway. `Brand`, `Last4` and the expiry are nullable: the gateway omits
 them when the provider did not report them. This is not the gateway's `paymentMethod` field (the
 string category of how the payer paid), which stays on `Raw`.

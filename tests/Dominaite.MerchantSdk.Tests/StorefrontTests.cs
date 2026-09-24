@@ -140,7 +140,7 @@ public class StorefrontTests
     public void TheConstantsSpellTheGatewayCodes()
     {
         Assert.Equal(
-            ["STOREFRONT_NOT_WHITELISTED", "STOREFRONT_INACTIVE", "STOREFRONT_MISMATCH"],
+            ["STOREFRONT_MISMATCH", "STOREFRONT_INACTIVE", "STOREFRONT_NOT_WHITELISTED"],
             ErrorCodes.Storefront);
         Assert.Equal("ALREADY_PROCESSED", ErrorCodes.AlreadyProcessed);
         Assert.Equal("PRIOR_ATTEMPT_FAILED", ErrorCodes.PriorAttemptFailed);

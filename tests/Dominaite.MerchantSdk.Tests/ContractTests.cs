@@ -30,7 +30,7 @@ public class ContractTests
     private const string Secret = "dms_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// <summary>The sha256 of the canonical fixture, shared across every SDK that vendors it.</summary>
-    private const string FixtureSha256 = "8bd0b6037f245d1c3d4e6c01aad42bef666a66f086f03c6b00a75e5023f88f20";
+    private const string FixtureSha256 = "49d12e8788e6ad314f961652aa737b3a17789433e9b06ee47277b8877b95cf5f";
 
     private static readonly JsonSerializerOptions ReadOptions = new()
     {
@@ -423,6 +423,37 @@ public class ContractTests
     }
 
     [Fact]
+    public void TheRetiredReasonVocabularyIsExactlyTheContracts()
+    {
+        Assert.Equal(Strings(Contract().GetProperty("storedPaymentMethodRetiredReasonVocabulary")), StoredPaymentMethodRetiredReasons.All);
+    }
+
+    [Fact]
+    public void TheStorefrontCodesAreExactlyTheContractsAndNotSessionRefusals()
+    {
+        var contract = Contract();
+        Assert.Equal(Strings(contract.GetProperty("storefrontErrorCodes")), ErrorCodes.Storefront);
+        Assert.Empty(ErrorCodes.Storefront.Intersect(Strings(contract.GetProperty("sessionRefusalErrorCodes"))));
+        Assert.Empty(ErrorCodes.Storefront.Intersect(ErrorCodes.SessionRefusals));
+    }
+
+    [Fact]
+    public void TheRetiredCardExampleReadsItsStatusAndReasonInBothWireForms()
+    {
+        foreach (var (form, body) in BothWireForms(Endpoint("getStatus").GetProperty("retiredCardExample")))
+        {
+            var parsed = JsonSerializer.Deserialize<CheckoutStatus>(body, ReadOptions)!;
+
+            Assert.Equal(TransactionStatuses.Refunded, parsed.Status);
+            var method = Assert.IsType<StoredPaymentMethod>(parsed.StoredPaymentMethod);
+            Assert.Equal(PaymentMethodId, method.Id);
+            Assert.Equal(StoredPaymentMethodStatuses.Retired, method.Status);
+            Assert.Equal(StoredPaymentMethodRetiredReasons.SourceSaleReversed, method.RetiredReason);
+            Assert.False(method.IsChargeable, form);
+        }
+    }
+
+    [Fact]
     public void TheChargeVocabulariesAreExactlyTheContracts()
     {
         var contract = Contract();
@@ -459,6 +490,7 @@ public class ContractTests
             Assert.Equal(12, method.ExpiryMonth);
             Assert.Equal(2029, method.ExpiryYear);
             Assert.Equal(StoredPaymentMethodStatuses.Active, method.Status);
+            Assert.Null(method.RetiredReason);
             Assert.True(method.IsChargeable, form);
         }
     }
