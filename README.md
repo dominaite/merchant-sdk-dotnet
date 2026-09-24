@@ -549,6 +549,9 @@ later makes you keep polling instead of closing an open order.
 capture, which is why `IsPaid` (settled) and `IsTerminal` (finished) both answer false for it. Never
 treat it as an abandoned order.
 
+`disputed` is not terminal either: a chargeback is open and resolves later, so keep watching it.
+`IsPaid` is false for it too, although the money did move.
+
 Call this from your server, never from the browser, and poll after the payer returns to you or on
 your order timeout - not in a tight loop, the endpoint is rate limited per key.
 

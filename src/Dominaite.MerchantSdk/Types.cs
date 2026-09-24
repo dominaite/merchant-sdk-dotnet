@@ -157,7 +157,9 @@ public static class TransactionStatuses
     /// <summary>The payment was cancelled before completion.</summary>
     public const string Cancelled = "cancelled";
 
-    /// <summary>The payment is disputed.</summary>
+    /// <summary>
+    /// The payment is disputed (a chargeback is open). Not terminal: a dispute resolves later.
+    /// </summary>
     public const string Disputed = "disputed";
 
     /// <summary>Authorized, awaiting capture. The payer HAS paid.</summary>
@@ -266,8 +268,11 @@ public sealed class CheckoutStatus
     /// False while the payment can still change, true once it cannot.
     /// </summary>
     /// <remarks>
-    /// An unrecognised status is reported as NOT terminal, so a status the API adds later makes
-    /// you keep polling rather than silently close an order that is still open.
+    /// <c>pending</c>, <c>processing</c>, <c>requires_capture</c> and <c>disputed</c> are not
+    /// terminal. A dispute resolves later, so keep watching it; <see cref="IsPaid"/> is false for
+    /// it too, although the money did move. An unrecognised status is also reported as NOT
+    /// terminal, so a status the API adds later makes you keep polling rather than silently close
+    /// an order that is still open.
     /// </remarks>
     [JsonIgnore]
     public bool IsTerminal => this.Status switch
@@ -277,7 +282,6 @@ public sealed class CheckoutStatus
         TransactionStatuses.Refunded => true,
         TransactionStatuses.PartiallyRefunded => true,
         TransactionStatuses.Cancelled => true,
-        TransactionStatuses.Disputed => true,
         TransactionStatuses.Abandoned => true,
         _ => false,
     };

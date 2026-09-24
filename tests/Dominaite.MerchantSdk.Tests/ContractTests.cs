@@ -192,6 +192,43 @@ public class ContractTests
         Assert.False(status.IsTerminal);
     }
 
+    /// <summary>
+    /// A dispute resolves later, so it is not an outcome to close the order on. Not paid either,
+    /// although the money did move.
+    /// </summary>
+    [Fact]
+    public void DisputedIsNeitherPaidNorTerminal()
+    {
+        var payload = JsonNode.Parse(Endpoint("getStatus").GetProperty("example").GetRawText())!;
+        payload["status"] = TransactionStatuses.Disputed;
+
+        var status = JsonSerializer.Deserialize<CheckoutStatus>(payload.ToJsonString(), ReadOptions)!;
+
+        Assert.False(status.IsPaid);
+        Assert.False(status.IsTerminal);
+    }
+
+    /// <summary>The whole vocabulary, pinned: which statuses end polling and which do not.</summary>
+    [Fact]
+    public void TheTerminalSetIsExactlyTheFinishedOutcomes()
+    {
+        string[] terminal =
+        [
+            TransactionStatuses.Succeeded,
+            TransactionStatuses.Failed,
+            TransactionStatuses.Refunded,
+            TransactionStatuses.PartiallyRefunded,
+            TransactionStatuses.Cancelled,
+            TransactionStatuses.Abandoned,
+        ];
+
+        foreach (var value in TransactionStatuses.All)
+        {
+            var status = new CheckoutStatus { Status = value };
+            Assert.True(terminal.Contains(value) == status.IsTerminal, value);
+        }
+    }
+
     [Fact]
     public void PingMatchesTheContract()
     {
