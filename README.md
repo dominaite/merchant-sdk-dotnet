@@ -204,8 +204,24 @@ network. The amount is locked server-side - what you pass here is what gets char
 the browser can change it. Compute it from your own catalog, never from the request body your page
 sent you.
 
-The minor-unit exponent follows ISO 4217 per currency: EUR has 2 decimals, JPY has 0 (so `2500` is
-JPY 2,500), KWD has 3. Never hardcode a x100 conversion.
+The minor-unit exponent depends on the currency: EUR has 2 decimals, JPY has 0 (so `2500` is
+JPY 2,500), KWD has 3. **HUF has 0 on the Dominaite gateway** (whole forints, so `1500` is 1,500
+HUF), which is not ISO 4217's 2. Never hardcode a x100 conversion. `MinorUnits` does it for you,
+with the gateway's exponents:
+
+```csharp
+long amount = MinorUnits.From(0.30m, "EUR");     // 30
+long yen = MinorUnits.From(2500m, "JPY");        // 2500
+int decimals = MinorUnits.Exponent("KWD");       // 3
+```
+
+It takes `decimal`, never `double` (`0.1 + 0.2` in floating point is not `0.3`). A price written
+with more decimals than the currency has throws `DominaiteValidationException` instead of being
+rounded, even when the extra digits are zeros (`25.000m` EUR, `2500.00m` JPY), and so does a
+negative price. ISK, KRW, OMR, JOD and TND throw as not supported: the gateway and ISO 4217
+disagree on them, and a wrong guess is a silent 100x or 10x charge. Any other currency the SDK has
+no exponent for throws too. `MinorUnits.Currencies` lists the ones it knows: EUR, USD, GBP, CAD,
+AUD, CHF, BGN, RON, PLN, CZK, SEK, DKK, NOK (2), JPY, HUF (0), BHD, KWD (3).
 
 ## Retries and double-charges
 
