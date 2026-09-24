@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0
+## 0.3.0
 
 Breaking. To migrate: set `IdempotencyKey` on every `CheckoutSessionRequest` and `ChargeRequest`,
 built from the order with `IdempotencyKeys.ForOrder("checkout", orderId, amountMinor, currency)`
@@ -25,7 +25,7 @@ built from the order with `IdempotencyKeys.ForOrder("checkout", orderId, amountM
   gateway's exponents: HUF is 0 (whole forints, not ISO 4217's 2); ISK, KRW, OMR, JOD and TND are
   refused as not supported.
 - Also first released here: stored payment methods (`SaveCard`, `ChargePaymentMethodAsync`,
-  `RevokePaymentMethodAsync`), which were versioned 0.3.0 but never published.
+  `RevokePaymentMethodAsync`), merged earlier but never published.
 
 ## 0.2.0
 
