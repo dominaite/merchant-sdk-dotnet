@@ -139,13 +139,6 @@ public sealed class DominaiteClient : IDisposable
     public string UserAgent { get; }
 
     /// <summary>
-    /// Mints a random v4 UUID for use as an idempotency key. Keys are per-payment, so a fresh one
-    /// is generated for every call that does not supply its own.
-    /// </summary>
-    /// <returns>A lowercase dashed UUID.</returns>
-    public static string NewIdempotencyKey() => Guid.NewGuid().ToString("D");
-
-    /// <summary>
     /// Verifies your credentials, your signing, and your clock without creating anything. Make
     /// this your first live call: a 401 here means the key id, the secret, or the signing, and a
     /// 503 means retry later - never both at once.
@@ -167,13 +160,12 @@ public sealed class DominaiteClient : IDisposable
     /// Opens a hosted checkout session for one payment.
     /// </summary>
     /// <param name="request">
-    /// The session parameters. When <see cref="CheckoutSessionRequest.IdempotencyKey"/> is null,
-    /// the client generates one and writes it back onto the request so you can log it and reuse
-    /// it on a retry.
+    /// The session parameters. <see cref="CheckoutSessionRequest.IdempotencyKey"/> is required:
+    /// derive it from the order with <see cref="IdempotencyKeys.ForOrder"/>.
     /// </param>
     /// <param name="cancellationToken">Cancels the call.</param>
     /// <returns>The created session. Hand its cashier values to the page that renders the widget.</returns>
-    /// <exception cref="DominaiteValidationException">Bad arguments; nothing was sent.</exception>
+    /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
     /// <exception cref="DominaiteRefusalException">The gateway refused the session; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
     /// <exception cref="DominaiteApiException">An unexpected or rejecting response.</exception>
@@ -184,7 +176,7 @@ public sealed class DominaiteClient : IDisposable
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var idempotencyKey = ResolveIdempotencyKey(request);
+        var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
         var body = SerializeBody(request);
 
         JsonElement payload;
@@ -236,9 +228,9 @@ public sealed class DominaiteClient : IDisposable
     /// whether the request landed, and a retried key never opens a second payment. If the first
     /// attempt did land, the retry comes back as a replay refusal
     /// (<c>DUPLICATE_REQUEST</c> / <c>ALREADY_PROCESSED</c>) naming that transaction, which you
-    /// read back with <see cref="GetStatusAsync"/>. Generating a fresh key per attempt would be
-    /// exactly the double-charge bug this method exists to prevent, so the key is pinned once
-    /// before the first attempt and written onto the request.
+    /// read back with <see cref="GetStatusAsync"/>. A fresh key per attempt would be exactly the
+    /// double-charge bug this method exists to prevent, so every attempt sends the request's own
+    /// key, which is required.
     /// Refusals and authentication failures are thrown immediately: they will not change.
     /// </remarks>
     /// <param name="request">The session parameters.</param>
@@ -258,8 +250,8 @@ public sealed class DominaiteClient : IDisposable
             throw new DominaiteValidationException("Attempts must be at least 1");
         }
 
-        // Pinned once, up front, and written back onto the request so the caller can see it.
-        request.IdempotencyKey = ResolveIdempotencyKey(request);
+        // Checked once, up front, so a missing key fails before the first attempt.
+        IdempotencyKeys.Validate(request.IdempotencyKey);
 
         DominaiteException? lastError = null;
         for (var attempt = 0; attempt < options.Attempts; attempt++)
@@ -338,12 +330,12 @@ public sealed class DominaiteClient : IDisposable
     /// </remarks>
     /// <param name="paymentMethodId">The <see cref="StoredPaymentMethod.Id"/> read off a paid session's status.</param>
     /// <param name="request">
-    /// The charge parameters. When <see cref="ChargeRequest.IdempotencyKey"/> is null, the client
-    /// generates one and writes it back onto the request so you can log it and reuse it on a retry.
+    /// The charge parameters. <see cref="ChargeRequest.IdempotencyKey"/> is required: derive it
+    /// from the order with <see cref="IdempotencyKeys.ForOrder"/>.
     /// </param>
     /// <param name="cancellationToken">Cancels the call.</param>
     /// <returns>The charge result. Check <see cref="PaymentMethodCharge.IsPaid"/>.</returns>
-    /// <exception cref="DominaiteValidationException">Bad arguments; nothing was sent.</exception>
+    /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
     /// <exception cref="DominaiteChargeException">The gateway answered with an error code; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
     /// <exception cref="DominaiteApiException">404 (PAYMENT_METHOD_NOT_FOUND) for a method that is not yours, a 400 validation rejection, or an unexpected response.</exception>
@@ -357,7 +349,7 @@ public sealed class DominaiteClient : IDisposable
         ArgumentNullException.ThrowIfNull(request);
 
         var id = NormalizePaymentMethodId(paymentMethodId);
-        var idempotencyKey = ResolveIdempotencyKey(request);
+        var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
         var body = SerializeBody(request);
         var path = $"{PaymentMethodsPath}/{id}/charges";
 
@@ -816,41 +808,6 @@ public sealed class DominaiteClient : IDisposable
         {
             throw new DominaiteValidationException("OrderReference must be at most 100 characters");
         }
-    }
-
-    private static string ResolveIdempotencyKey(CheckoutSessionRequest request)
-    {
-        var key = NormalizeIdempotencyKey(request.IdempotencyKey);
-        request.IdempotencyKey = key;
-        return key;
-    }
-
-    private static string ResolveIdempotencyKey(ChargeRequest request)
-    {
-        var key = NormalizeIdempotencyKey(request.IdempotencyKey);
-        request.IdempotencyKey = key;
-        return key;
-    }
-
-    /// <summary>A null key is generated; a supplied key is checked, never rewritten.</summary>
-    private static string NormalizeIdempotencyKey(string? provided)
-    {
-        if (provided is null)
-        {
-            return NewIdempotencyKey();
-        }
-
-        if (string.IsNullOrWhiteSpace(provided))
-        {
-            throw new DominaiteValidationException("IdempotencyKey must not be empty");
-        }
-
-        if (provided.Length > 100)
-        {
-            throw new DominaiteValidationException("IdempotencyKey must be at most 100 characters");
-        }
-
-        return provided;
     }
 
     private static string NormalizePaymentMethodId(string paymentMethodId)

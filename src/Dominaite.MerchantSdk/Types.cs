@@ -67,12 +67,14 @@ public sealed class CheckoutSessionRequest
     public bool? SaveCard { get; set; }
 
     /// <summary>
-    /// The idempotency key. It travels in the header and in the signature, never in the body.
+    /// The idempotency key. Required. It travels in the header and in the signature, never in the
+    /// body.
     /// </summary>
     /// <remarks>
-    /// Leave it null and the client generates one per logical call and writes it back here, so
-    /// you can log it and reuse it. Reusing a key never opens a second payment; it comes back as
-    /// a replay refusal naming the transaction it collided with.
+    /// Derive it from the order with <see cref="IdempotencyKeys.ForOrder"/>: the same order at the
+    /// same amount then replays the same session on a reload or a retry, and a changed amount gets
+    /// a new key. Null or blank is rejected before anything is sent. Reusing a key never opens a
+    /// second payment.
     /// </remarks>
     [JsonIgnore]
     public string? IdempotencyKey { get; set; }
@@ -364,12 +366,13 @@ public sealed class ChargeRequest
     public string? Description { get; set; }
 
     /// <summary>
-    /// The idempotency key. Required and signed exactly like a session create: it travels in the
+    /// The idempotency key. Required, and signed exactly like a session create: it travels in the
     /// header and in the signature, never in the body.
     /// </summary>
     /// <remarks>
-    /// Leave it null and the client generates one per logical call and writes it back here. Pin
-    /// your own when you retry: a fresh key on a retry is the double-charge bug.
+    /// Derive it from the order with <see cref="IdempotencyKeys.ForOrder"/> (scope "charge"), and
+    /// send the same key when you retry: a fresh key on a retry is the double-charge bug. Null or
+    /// blank is rejected before anything is sent.
     /// </remarks>
     [JsonIgnore]
     public string? IdempotencyKey { get; set; }

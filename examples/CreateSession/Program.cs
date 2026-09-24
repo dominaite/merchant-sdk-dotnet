@@ -37,6 +37,9 @@ try
         Currency = "EUR",
         OrderReference = "order-1042",
 
+        // Required. Derived from the order, so a reload or a retry replays this same session.
+        IdempotencyKey = IdempotencyKeys.ForOrder("checkout", "order-1042", 2500, "EUR"),
+
         // Pass everything you already know - prefilled fields are hidden from the payer, so the
         // checkout form stays short.
         Customer = new Customer

@@ -90,6 +90,9 @@ var session = await client.CreateCheckoutSessionAsync(new CheckoutSessionRequest
     Currency = "EUR",
     OrderReference = "order-1042",
     Customer = new Customer { FirstName = "Ana", Email = "ana@example.com" },
+
+    // Required. Same order + same amount = same key, so a reload or a retry replays this session.
+    IdempotencyKey = IdempotencyKeys.ForOrder("checkout", "order-1042", 2500, "EUR"),
 });
 
 // Store session.TransactionId against your order, then hand CashierKey and CashierToken to the
@@ -206,11 +209,24 @@ JPY 2,500), KWD has 3. Never hardcode a x100 conversion.
 
 ## Retries and double-charges
 
-Every `CreateCheckoutSessionAsync` call carries an idempotency key. Leave
-`CheckoutSessionRequest.IdempotencyKey` null and the client generates one per logical call and
-writes it back onto the request, so you can log it and reuse it.
+Every `CreateCheckoutSessionAsync` and `ChargePaymentMethodAsync` call needs an idempotency key,
+and the SDK never makes one up: a null or blank `IdempotencyKey` throws
+`DominaiteValidationException` before anything is sent. Derive the key from the order:
 
-`CreateCheckoutSessionWithRetryAsync` pins one key up front and reuses it across every attempt,
+```csharp
+var key = IdempotencyKeys.ForOrder("checkout", order.Id, amountMinor, "EUR");
+// "checkout-order-1042-2500-EUR"
+```
+
+The key is `{scope}-{orderId}-{amountMinor}-{CURRENCY}`. The same order at the same amount always
+gives the same key, so a page reload, a back button or a retried POST replays the session that
+already exists instead of opening a second payment. A changed amount or currency gives a new key,
+which is what the gateway wants: a reused key with a different amount is refused as
+`IDEMPOTENCY_KEY_REUSED`. Use a different scope per kind of call (`checkout` for sessions,
+`charge` for stored-card charges). The key is checked against the same rules as one you build
+yourself: at most 100 characters, no control characters.
+
+`CreateCheckoutSessionWithRetryAsync` sends the request's key on every attempt,
 retrying only transport failures (network errors, timeouts, and 5xx including
 `MERCHANT_API_UNAVAILABLE`). Refusals and authentication failures are thrown immediately - they
 will not change.
@@ -273,6 +289,7 @@ var session = await client.CreateCheckoutSessionAsync(new CheckoutSessionRequest
     Currency = "EUR",
     OrderReference = "order-1042",
     SaveCard = true,
+    IdempotencyKey = IdempotencyKeys.ForOrder("checkout", "order-1042", 2500, "EUR"),
 });
 ```
 
@@ -293,8 +310,7 @@ if (status.StoredPaymentMethod is { IsChargeable: true } method)
 
 Charge the stored card later, off-session, with `ChargePaymentMethodAsync`. The call takes the
 same amount, currency and order reference as a session, and an idempotency key that is required
-and signed exactly like `CreateCheckoutSessionAsync` (one is generated and written back onto the
-request when you do not set one; pin your own when you retry).
+and signed exactly like `CreateCheckoutSessionAsync`. Send the same key when you retry.
 
 ```csharp
 try
@@ -305,6 +321,7 @@ try
         Currency = "EUR",
         OrderReference = "order-1043",
         Description = "Monthly plan",
+        IdempotencyKey = IdempotencyKeys.ForOrder("charge", "order-1043", 2500, "EUR"),
     });
 
     switch (charge.Status)
@@ -531,7 +548,7 @@ machine-readable string where there is one.
 | `DominaiteChargeException` | `ChargePaymentMethodAsync` got an error code instead of a charge: 409, 422, 502 or 503. Carries `Charge`, `TransactionId` and `RawResult`. | Branch on `Code` (see [Stored payment methods](#stored-payment-methods-recurring)). `CHARGE_OUTCOME_UNKNOWN` carries the `TransactionId` to poll; never retry it under a new key. |
 | `DominaiteRevokeException` | `RevokePaymentMethodAsync` was refused: 502 `UPSTREAM_CONTRACT_ERROR` or 503 `MERCHANT_API_UNAVAILABLE`. Nothing changed. | Retry later on 503; contact support on 502. |
 | `DominaiteApiException` | Any other rejecting or unexpected response, including a 3xx. `Code` carries the API's reason when it sent one, e.g. `IDEMPOTENCY_KEY_REQUIRED` on a 400, `PAYMENT_METHOD_NOT_FOUND` on a charge 404. | Inspect `HttpStatus` and `Code`. A 404 from `GetStatusAsync` is an unknown transaction id. |
-| `DominaiteValidationException` | Bad arguments (non-positive amount, missing field, malformed key id). | Fix the call; nothing was sent. |
+| `DominaiteValidationException` | Bad arguments (non-positive amount, missing field, missing idempotency key, malformed key id). | Fix the call; nothing was sent. |
 
 Failures from a session create also carry `IdempotencyKey`, so a log line tells you which key to
 reuse.

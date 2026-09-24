@@ -77,6 +77,7 @@ public class ContractTests
         Amount = 8440,
         Currency = "EUR",
         OrderReference = "order-1042",
+        IdempotencyKey = "checkout-order-1042-8440-EUR",
     };
 
     private const string PaymentMethodId = "pm_0123456789abcdef0123456789abcdef";
@@ -86,6 +87,7 @@ public class ContractTests
         Amount = 2500,
         Currency = "EUR",
         OrderReference = "order-1043",
+        IdempotencyKey = "charge-order-1043-2500-EUR",
     };
 
     /// <summary>

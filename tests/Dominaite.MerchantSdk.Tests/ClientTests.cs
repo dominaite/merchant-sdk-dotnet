@@ -29,6 +29,7 @@ public class ClientTests
         Amount = 8440,
         Currency = "EUR",
         OrderReference = "order-1042",
+        IdempotencyKey = "checkout-order-1042-8440-EUR",
     };
 
     [Fact]
@@ -85,6 +86,7 @@ public class ClientTests
             Currency = "EUR",
             OrderReference = "order-1042",
             Customer = new Customer { FirstName = "Анна", LastName = "Müller" },
+            IdempotencyKey = "00000000-0000-4000-8000-000000000001",
         };
 
         await client.CreateCheckoutSessionAsync(request);
@@ -114,20 +116,47 @@ public class ClientTests
             server.LastRequest.Body);
     }
 
-    [Fact]
-    public async Task AGeneratedIdempotencyKeyIsWrittenBackOntoTheRequest()
+    /// <summary>
+    /// The key is required: the SDK never makes one up, because a key made up per call cannot
+    /// recognise the same order coming back. A missing or blank key fails before the network,
+    /// on the plain call and on the retry helper alike.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task AMissingIdempotencyKeyIsRejectedBeforeAnythingIsSent(string? key)
     {
         using var server = new MockServer(Reply.Enveloped(SuccessPayload));
         using var client = ClientFor(server);
 
         var request = Request();
-        Assert.Null(request.IdempotencyKey);
+        request.IdempotencyKey = key;
+
+        var error = await Assert.ThrowsAsync<DominaiteValidationException>(
+            () => client.CreateCheckoutSessionAsync(request));
+        Assert.Contains("IdempotencyKey", error.Message, StringComparison.Ordinal);
+
+        await Assert.ThrowsAsync<DominaiteValidationException>(
+            () => client.CreateCheckoutSessionWithRetryAsync(request));
+
+        Assert.Equal(key, request.IdempotencyKey);
+        Assert.Empty(server.Requests);
+    }
+
+    [Fact]
+    public async Task TheSuppliedKeyIsSentAndSignedUnchanged()
+    {
+        using var server = new MockServer(Reply.Enveloped(SuccessPayload));
+        using var client = ClientFor(server);
+
+        var request = Request();
+        request.IdempotencyKey = IdempotencyKeys.ForOrder("checkout", "order-1042", 8440, "eur");
 
         await client.CreateCheckoutSessionAsync(request);
 
-        Assert.NotNull(request.IdempotencyKey);
-        Assert.True(Guid.TryParseExact(request.IdempotencyKey, "D", out _));
-        Assert.Equal(request.IdempotencyKey, server.LastRequest.Header("Idempotency-Key"));
+        Assert.Equal("checkout-order-1042-8440-EUR", request.IdempotencyKey);
+        Assert.Equal("checkout-order-1042-8440-EUR", server.LastRequest.Header("Idempotency-Key"));
     }
 
     [Fact]
@@ -423,11 +452,11 @@ public class ClientTests
         using var client = ClientFor(server);
 
         await Assert.ThrowsAsync<DominaiteValidationException>(
-            () => client.CreateCheckoutSessionAsync(new CheckoutSessionRequest { Amount = 0, Currency = "EUR", OrderReference = "x" }));
+            () => client.CreateCheckoutSessionAsync(new CheckoutSessionRequest { Amount = 0, Currency = "EUR", OrderReference = "x", IdempotencyKey = "k" }));
         await Assert.ThrowsAsync<DominaiteValidationException>(
-            () => client.CreateCheckoutSessionAsync(new CheckoutSessionRequest { Amount = 100, Currency = " ", OrderReference = "x" }));
+            () => client.CreateCheckoutSessionAsync(new CheckoutSessionRequest { Amount = 100, Currency = " ", OrderReference = "x", IdempotencyKey = "k" }));
         await Assert.ThrowsAsync<DominaiteValidationException>(
-            () => client.CreateCheckoutSessionAsync(new CheckoutSessionRequest { Amount = 100, Currency = "EUR", OrderReference = "" }));
+            () => client.CreateCheckoutSessionAsync(new CheckoutSessionRequest { Amount = 100, Currency = "EUR", OrderReference = "", IdempotencyKey = "k" }));
         await Assert.ThrowsAsync<DominaiteValidationException>(() => client.GetStatusAsync("not-a-uuid"));
 
         Assert.Empty(server.Requests);
