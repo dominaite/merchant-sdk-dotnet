@@ -24,8 +24,8 @@ public static class IdempotencyKeys
     /// <remarks>
     /// Use a different <paramref name="scope"/> per kind of call ("checkout" for a session,
     /// "charge" for a stored-card charge) so the two never collide for the same order. The key is
-    /// checked against the same rules as a key you supply yourself, so a long order id fails here,
-    /// before anything is sent.
+    /// checked against the same rules as a key you supply yourself, so a long order id, or one
+    /// with spaces or non-ASCII characters, fails here, before anything is sent.
     /// </remarks>
     /// <param name="scope">What the key is for, e.g. "checkout". Constant per call site.</param>
     /// <param name="orderId">Your own order id.</param>
@@ -67,9 +67,11 @@ public static class IdempotencyKeys
     }
 
     /// <summary>
-    /// The key rules, applied to every key before it is signed: present, not blank, at most
-    /// <see cref="MaxLength"/> characters, and no control characters (the key travels in an HTTP
-    /// header). A valid key is returned unchanged, never rewritten.
+    /// The key rules, applied to every key before it is signed: present, 1 to
+    /// <see cref="MaxLength"/> characters, visible ASCII only (0x21 to 0x7E: no spaces, no
+    /// control characters, nothing outside ASCII). The key travels in an HTTP header and is
+    /// signed byte for byte, so anything else is ambiguous on the wire. A valid key is returned
+    /// unchanged, never rewritten.
     /// </summary>
     internal static string Validate(string? key)
     {
@@ -90,9 +92,10 @@ public static class IdempotencyKeys
             throw new DominaiteValidationException($"IdempotencyKey must be at most {MaxLength} characters");
         }
 
-        if (key.Any(char.IsControl))
+        if (key.Any(c => c is < '\x21' or > '\x7E'))
         {
-            throw new DominaiteValidationException("IdempotencyKey must not contain control characters");
+            throw new DominaiteValidationException(
+                "IdempotencyKey must be visible ASCII only (no spaces, control or non-ASCII characters)");
         }
 
         return key;

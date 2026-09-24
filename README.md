@@ -240,7 +240,8 @@ already exists instead of opening a second payment. A changed amount or currency
 which is what the gateway wants: a reused key with a different amount is refused as
 `IDEMPOTENCY_KEY_REUSED`. Use a different scope per kind of call (`checkout` for sessions,
 `charge` for stored-card charges). The key is checked against the same rules as one you build
-yourself: at most 100 characters, no control characters.
+yourself: 1 to 100 characters, visible ASCII only (`!` to `~`, so no spaces and no non-ASCII order
+ids).
 
 `CreateCheckoutSessionWithRetryAsync` sends the request's key on every attempt,
 retrying transport failures (network errors, timeouts, and 5xx including
