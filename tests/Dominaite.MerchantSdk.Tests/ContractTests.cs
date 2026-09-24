@@ -396,6 +396,12 @@ public class ContractTests
     }
 
     [Fact]
+    public void TheSessionRefusalCodesAreExactlyTheContracts()
+    {
+        Assert.Equal(Strings(Contract().GetProperty("sessionRefusalErrorCodes")), ErrorCodes.SessionRefusals);
+    }
+
+    [Fact]
     public void TheStoredPaymentMethodObjectMatchesTheContract()
     {
         var getStatus = Endpoint("getStatus");

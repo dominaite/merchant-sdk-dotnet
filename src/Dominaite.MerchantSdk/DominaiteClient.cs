@@ -167,6 +167,7 @@ public sealed class DominaiteClient : IDisposable
     /// <returns>The created session. Hand its cashier values to the page that renders the widget.</returns>
     /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
     /// <exception cref="DominaiteRefusalException">The gateway refused the session; inspect Code.</exception>
+    /// <exception cref="DominaiteStorefrontException">The storefront is not whitelisted, inactive, or not the key's; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
     /// <exception cref="DominaiteApiException">An unexpected or rejecting response.</exception>
     /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry with the same key.</exception>
@@ -179,10 +180,10 @@ public sealed class DominaiteClient : IDisposable
         var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
         var body = SerializeBody(request);
 
-        JsonElement payload;
+        ApiReply reply;
         try
         {
-            payload = await this.RequestAsync(HttpMethod.Post, SessionsPath, body, idempotencyKey, cancellationToken)
+            reply = await this.SendAsync(HttpMethod.Post, SessionsPath, body, idempotencyKey, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (DominaiteException error)
@@ -190,6 +191,19 @@ public sealed class DominaiteClient : IDisposable
             error.IdempotencyKey = idempotencyKey;
             throw;
         }
+
+        // The storefront codes arrive as a real HTTP 409 or 400, and a 400 would otherwise read as
+        // one more validation error. They are configuration, not input, so they get their own type.
+        if (reply.Status >= 400)
+        {
+            var rejection = reply.Status < 500 && reply.StorefrontRefusal() is { } storefront
+                ? storefront
+                : reply.Rejection();
+            rejection.IdempotencyKey = idempotencyKey;
+            throw rejection;
+        }
+
+        var payload = reply.Payload;
 
         // Create is the nested shape: an inner `success` next to `checkout`. The status and ping
         // reads are flat and have neither, which is why the branch lives here rather than in the
@@ -204,6 +218,14 @@ public sealed class DominaiteClient : IDisposable
             var session = Deserialize<CheckoutSession>(checkout, "checkout object");
             session.Raw = checkout.Clone();
             return session;
+        }
+
+        // A storefront mismatch on an idempotent replay comes back as a 200 refusal; it is still
+        // the same storefront problem, so it is still the same exception.
+        if (reply.StorefrontRefusal() is { } replayStorefront)
+        {
+            replayStorefront.IdempotencyKey = idempotencyKey;
+            throw replayStorefront;
         }
 
         // A replay refusal names the transaction the key collided with. Carry it so the caller
@@ -725,6 +747,26 @@ public sealed class DominaiteClient : IDisposable
             var charge = Deserialize<PaymentMethodCharge>(data, "charge");
             charge.Raw = data;
             return charge;
+        }
+
+        /// <summary>
+        /// A <see cref="DominaiteStorefrontException"/> when the answer carries one of the
+        /// <see cref="ErrorCodes.Storefront"/> codes, else null.
+        /// </summary>
+        public DominaiteStorefrontException? StorefrontRefusal()
+        {
+            var code = this.ErrorCode;
+            if (code is null || !ErrorCodes.Storefront.Contains(code, StringComparer.Ordinal))
+            {
+                return null;
+            }
+
+            return new DominaiteStorefrontException(
+                this.Status,
+                code,
+                this.ErrorMessage ?? "The storefront refused the checkout session.",
+                StringField(this.Payload, "transactionId"),
+                this.Envelope);
         }
 
         /// <summary>

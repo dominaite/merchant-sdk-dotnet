@@ -140,6 +140,113 @@ public sealed class DominaiteApiException : DominaiteException
 }
 
 /// <summary>
+/// The gateway codes a checkout integration branches on, as constants. The stored-card codes live
+/// in <see cref="ChargeErrorCodes"/> and <see cref="RevokeErrorCodes"/>.
+/// </summary>
+public static class ErrorCodes
+{
+    /// <summary>
+    /// HTTP 409 on session create: the storefront's domain is not whitelisted with the payment
+    /// provider yet. Nothing was created. Not retryable until the whitelisting is done; arrives as
+    /// <see cref="DominaiteStorefrontException"/>.
+    /// </summary>
+    public const string StorefrontNotWhitelisted = "STOREFRONT_NOT_WHITELISTED";
+
+    /// <summary>
+    /// HTTP 409 on session create: the storefront was deactivated or deleted. Arrives as
+    /// <see cref="DominaiteStorefrontException"/>.
+    /// </summary>
+    public const string StorefrontInactive = "STOREFRONT_INACTIVE";
+
+    /// <summary>
+    /// HTTP 400 on session create: the API key is bound to one storefront and the request named
+    /// another. Arrives as <see cref="DominaiteStorefrontException"/>.
+    /// </summary>
+    public const string StorefrontMismatch = "STOREFRONT_MISMATCH";
+
+    /// <summary>
+    /// Session refusal: this idempotency key's payment already moved money (paid, refunded,
+    /// disputed, or held awaiting capture). Read it back with the named transaction.
+    /// </summary>
+    public const string AlreadyProcessed = "ALREADY_PROCESSED";
+
+    /// <summary>Session refusal: the earlier attempt with this key ended failed, cancelled or abandoned. Use a fresh key.</summary>
+    public const string PriorAttemptFailed = "PRIOR_ATTEMPT_FAILED";
+
+    /// <summary>
+    /// A request with this key is already open or in flight. Re-send the SAME key shortly, never a
+    /// fresh one.
+    /// </summary>
+    public const string DuplicateRequest = "DUPLICATE_REQUEST";
+
+    /// <summary>
+    /// Card payments are off right now; nothing was created or charged. HTTP 200 on session
+    /// create, 503 on a stored-card charge. Retryable with the SAME key.
+    /// </summary>
+    public const string PaymentProcessingUnavailable = "PAYMENT_PROCESSING_UNAVAILABLE";
+
+    /// <summary>The key was already used with a different body (amount, currency, storefront). Use a fresh key.</summary>
+    public const string IdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED";
+
+    /// <summary>The session refusal codes, in the order the canonical contract lists them.</summary>
+    public static IReadOnlyList<string> SessionRefusals { get; } =
+    [
+        PaymentProcessingUnavailable,
+        DuplicateRequest,
+        AlreadyProcessed,
+        IdempotencyKeyReused,
+        PriorAttemptFailed,
+    ];
+
+    /// <summary>The codes <see cref="DominaiteClient.CreateCheckoutSessionAsync"/> throws as a <see cref="DominaiteStorefrontException"/>.</summary>
+    public static IReadOnlyList<string> Storefront { get; } =
+    [
+        StorefrontNotWhitelisted,
+        StorefrontInactive,
+        StorefrontMismatch,
+    ];
+}
+
+/// <summary>
+/// The gateway refused a session because of the storefront (the online location the session is
+/// attributed to): <c>STOREFRONT_NOT_WHITELISTED</c> and <c>STOREFRONT_INACTIVE</c> (HTTP 409) or
+/// <c>STOREFRONT_MISMATCH</c> (HTTP 400, or 200 on an idempotent replay). Nothing was created.
+/// </summary>
+/// <remarks>
+/// A retry will not help: this is configuration. Whitelisting the domain with the provider,
+/// reactivating the storefront or using the key bound to the right storefront is what fixes it.
+/// Branch on <see cref="DominaiteException.Code"/>, see <see cref="ErrorCodes.Storefront"/>.
+/// </remarks>
+public sealed class DominaiteStorefrontException : DominaiteException
+{
+    /// <summary>Initializes a new instance of the <see cref="DominaiteStorefrontException"/> class.</summary>
+    /// <param name="httpStatus">The HTTP status that carried the code.</param>
+    /// <param name="code">One of the <see cref="ErrorCodes.Storefront"/> codes.</param>
+    /// <param name="message">The human-readable reason from the API.</param>
+    /// <param name="transactionId">The payment an idempotent replay collided with, when named.</param>
+    /// <param name="rawResult">The whole envelope, as received.</param>
+    public DominaiteStorefrontException(
+        int httpStatus,
+        string code,
+        string message,
+        string? transactionId,
+        JsonElement rawResult)
+        : base(message)
+    {
+        this.HttpStatus = httpStatus;
+        this.Code = code;
+        this.TransactionId = transactionId;
+        this.RawResult = rawResult;
+    }
+
+    /// <summary>The payment the key collided with, on a replay refusal; null on a fresh mint.</summary>
+    public string? TransactionId { get; }
+
+    /// <summary>The whole envelope exactly as received, for fields the typed surface does not model.</summary>
+    public JsonElement RawResult { get; }
+}
+
+/// <summary>
 /// The codes <see cref="DominaiteClient.ChargePaymentMethodAsync"/> throws as a
 /// <see cref="DominaiteChargeException"/>, in the gateway's own order. <c>CHARGE_DECLINED</c>
 /// (HTTP 402) is deliberately not one of them: a decline is a charge result with status

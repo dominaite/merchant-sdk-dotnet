@@ -543,6 +543,7 @@ machine-readable string where there is one.
 | Exception | When | What to do |
 |---|---|---|
 | `DominaiteRefusalException` | HTTP 200 with `success: false`. Carries `TransactionId` and `RawResult`. | Branch on `Code`. Do not blind-retry. |
+| `DominaiteStorefrontException` | Session create refused because of the storefront: `STOREFRONT_NOT_WHITELISTED` or `STOREFRONT_INACTIVE` (409), `STOREFRONT_MISMATCH` (400, or 200 on a replay). Carries `TransactionId` on a replay and `RawResult`. | Configuration, not a retry. See [Storefront errors](#storefront-errors). |
 | `DominaiteAuthException` | 401/403. `Code` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
 | `DominaiteTransportException` | Network failure, timeout, or a 5xx without a gateway code, including one whose body is an HTML error page from a proxy. | Retry with the **same** idempotency key. `IsRetryable` is true only here. |
 | `DominaiteChargeException` | `ChargePaymentMethodAsync` got an error code instead of a charge: 409, 422, 502 or 503. Carries `Charge`, `TransactionId` and `RawResult`. | Branch on `Code` (see [Stored payment methods](#stored-payment-methods-recurring)). `CHARGE_OUTCOME_UNKNOWN` carries the `TransactionId` to poll; never retry it under a new key. |
@@ -562,7 +563,30 @@ Refusal codes on `DominaiteRefusalException`:
 - `PRIOR_ATTEMPT_FAILED` - the earlier attempt with this key failed; use a fresh key.
 - `IDEMPOTENCY_KEY_REUSED` - same key sent with a different body; use a fresh key.
 
-All five arrive as HTTP 200 with `success: false`, not as an HTTP error status.
+All five arrive as HTTP 200 with `success: false`, not as an HTTP error status. Every code has a
+constant on `ErrorCodes` (`ErrorCodes.AlreadyProcessed`, `ErrorCodes.DuplicateRequest`, ...), so
+branch on those rather than on string literals.
+
+### Storefront errors
+
+A storefront is one website under your merchant account. When a session is attributed to one,
+the gateway can refuse it before anything is created:
+
+- `STOREFRONT_NOT_WHITELISTED` (HTTP 409) - the site's domain is not whitelisted with the payment
+  provider yet. Ask Dominaite support to finish the whitelisting; retrying will not help.
+- `STOREFRONT_INACTIVE` (HTTP 409) - the storefront was deactivated or deleted.
+- `STOREFRONT_MISMATCH` (HTTP 400) - the API key is bound to a different storefront than the one
+  the request names. An idempotent replay says the same thing as HTTP 200 with `success: false`.
+
+All three arrive as `DominaiteStorefrontException`, whatever the status, and the retry helper
+never retries them:
+
+```csharp
+catch (DominaiteStorefrontException error) when (error.Code == ErrorCodes.StorefrontNotWhitelisted)
+{
+    // Show "payments are not available on this site yet" and alert your ops channel.
+}
+```
 
 ## Refunds, captures and voids
 
