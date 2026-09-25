@@ -456,6 +456,13 @@ public enum WebhookFailureReason
     /// genuine delivery, or your server clock has drifted off NTP.
     /// </summary>
     TimestampOutOfTolerance,
+
+    /// <summary>
+    /// The signature verified but the body is not a webhook envelope this SDK can read: not JSON,
+    /// or missing <c>id</c> / <c>type</c>, or a field of the wrong type. Only
+    /// <see cref="Webhooks.VerifyAndParse(string, string, string, int, long?)"/> raises it.
+    /// </summary>
+    MalformedPayload,
 }
 
 /// <summary>

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 
 namespace Dominaite.MerchantSdk;
 
@@ -23,6 +24,12 @@ public static class Webhooks
     public const int DefaultToleranceSeconds = 300;
 
     private const int MacLengthBytes = 32;
+
+    private static readonly JsonSerializerOptions EventJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+    };
 
     /// <summary>
     /// Verifies one webhook delivery. Returning normally means the payload is authentic and
@@ -142,6 +149,139 @@ public static class Webhooks
             return false;
         }
     }
+
+    /// <summary>
+    /// Verifies one webhook delivery, then parses it into a <see cref="WebhookEvent"/>. The
+    /// signature is checked over the raw bytes first, exactly as <see cref="Verify(byte[], string, string, int, long?)"/>
+    /// does; nothing is parsed unless it passes.
+    /// </summary>
+    /// <param name="payload">The RAW request body, byte for byte as received.</param>
+    /// <param name="signatureHeader">The <c>X-Webhook-Signature</c> value.</param>
+    /// <param name="secret">That endpoint's <c>whsec_...</c> secret.</param>
+    /// <param name="toleranceSeconds">Bounds <c>|now - t|</c>.</param>
+    /// <param name="nowUnixSeconds">Unix seconds, for tests. Null reads the system clock.</param>
+    /// <returns>The verified event.</returns>
+    /// <exception cref="DominaiteWebhookException">
+    /// The delivery did not verify, or verified but is not a readable envelope
+    /// (<see cref="WebhookFailureReason.MalformedPayload"/>).
+    /// </exception>
+    public static WebhookEvent VerifyAndParse(
+        byte[] payload,
+        string signatureHeader,
+        string secret,
+        int toleranceSeconds = DefaultToleranceSeconds,
+        long? nowUnixSeconds = null)
+    {
+        Verify(payload, signatureHeader, secret, toleranceSeconds, nowUnixSeconds);
+        return ParseEvent(payload);
+    }
+
+    /// <summary>
+    /// Verifies one webhook delivery whose body you hold as a string, then parses it into a
+    /// <see cref="WebhookEvent"/>.
+    /// </summary>
+    /// <param name="payload">The RAW request body, exactly as received.</param>
+    /// <param name="signatureHeader">The <c>X-Webhook-Signature</c> value.</param>
+    /// <param name="secret">That endpoint's <c>whsec_...</c> secret.</param>
+    /// <param name="toleranceSeconds">Bounds <c>|now - t|</c>.</param>
+    /// <param name="nowUnixSeconds">Unix seconds, for tests. Null reads the system clock.</param>
+    /// <returns>The verified event.</returns>
+    /// <exception cref="DominaiteWebhookException">
+    /// The delivery did not verify, or verified but is not a readable envelope.
+    /// </exception>
+    public static WebhookEvent VerifyAndParse(
+        string payload,
+        string signatureHeader,
+        string secret,
+        int toleranceSeconds = DefaultToleranceSeconds,
+        long? nowUnixSeconds = null)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        return VerifyAndParse(Encoding.UTF8.GetBytes(payload), signatureHeader, secret, toleranceSeconds, nowUnixSeconds);
+    }
+
+    /// <summary>
+    /// Reads an already-verified body. Unknown fields are ignored and every field added after the
+    /// first release (apiVersion, sequence) is optional, so an older payload still parses.
+    /// </summary>
+    private static WebhookEvent ParseEvent(byte[] payload)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                throw MalformedPayload("the body is not a JSON object");
+            }
+
+            var evt = new WebhookEvent
+            {
+                Id = RequiredString(root, "id"),
+                Type = RequiredString(root, "type"),
+                ApiVersion = OptionalString(root, "apiVersion"),
+                CreatedAt = OptionalInstant(root, "createdAt"),
+                Raw = root.Clone(),
+            };
+
+            if (root.TryGetProperty("data", out var data))
+            {
+                evt.Data = data.Clone();
+            }
+
+            if (evt.Data.ValueKind == JsonValueKind.Object)
+            {
+                if (evt.Type.StartsWith("agreement.", StringComparison.Ordinal))
+                {
+                    evt.Agreement = evt.Data.Deserialize<AgreementEventData>(EventJsonOptions)!;
+                    evt.Agreement.Raw = evt.Data;
+                }
+                else if (evt.Type.StartsWith("charge.", StringComparison.Ordinal))
+                {
+                    evt.Charge = evt.Data.Deserialize<ChargeEventData>(EventJsonOptions)!;
+                    evt.Charge.Raw = evt.Data;
+                }
+            }
+
+            return evt;
+        }
+        catch (JsonException error)
+        {
+            throw MalformedPayload($"the body is not a readable envelope ({error.Message})");
+        }
+    }
+
+    private static string RequiredString(JsonElement root, string name)
+        => OptionalString(root, name) is { Length: > 0 } value
+            ? value
+            : throw MalformedPayload($"no \"{name}\" string");
+
+    private static string? OptionalString(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        return value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : throw MalformedPayload($"\"{name}\" is not a string");
+    }
+
+    private static DateTimeOffset? OptionalInstant(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        return value.ValueKind == JsonValueKind.String && value.TryGetDateTimeOffset(out var instant)
+            ? instant
+            : throw MalformedPayload($"\"{name}\" is not an ISO 8601 instant");
+    }
+
+    private static DominaiteWebhookException MalformedPayload(string detail)
+        => new(WebhookFailureReason.MalformedPayload, $"Malformed webhook payload: {detail}.");
 
     /// <summary>
     /// Splits <c>t={unix_seconds},v1={hex}</c> into its parts, enforcing the wire contract's
