@@ -461,6 +461,19 @@ else if (failure!.Reason == WebhookFailureReason.TimestampOutOfTolerance)
 for tests and pinned vectors, and null reads the system clock. There is a `byte[]` overload for
 handlers that hold the raw request bytes.
 
+`Webhooks.VerifyAndParse` takes the same arguments, verifies first, and only then parses the body
+into a typed `WebhookEvent`: `Id`, `Type`, `ApiVersion`, `CreatedAt`, `Data` (the raw `data`
+object), plus `Agreement` or `Charge` typed for `agreement.*` and `charge.*` events. A body that
+verifies but is not a readable envelope throws with `WebhookFailureReason.MalformedPayload`.
+
+```csharp
+var evt = Webhooks.VerifyAndParse(body, signatureHeader, secret);
+if (evt.Type == WebhookEventTypes.PaymentSucceeded)
+{
+    var transactionId = evt.Data.GetProperty("transactionId").GetString();
+}
+```
+
 The MAC comparison is constant-time, and it runs before the timestamp check so an unsigned request
 learns nothing about your tolerance window.
 
@@ -481,6 +494,7 @@ Flat JSON, no `success` wrapper - do not branch on a `success` field, there isn'
 {
   "id": "<delivery id - your dedupe key>",
   "type": "payment.succeeded",
+  "apiVersion": "2026-09-25",
   "createdAt": "<ISO 8601 UTC instant of the transition>",
   "data": {
     "transactionId": "...",
@@ -501,10 +515,16 @@ Amounts are minor units. On `payment.*` events `amount` is what you are PAID (ba
 `grossAmount` is the card movement; on `payment.refunded` the `amount` is what went back to the
 customer. `surchargeAmount`, `previousStatus`, `kind` and `originalTransactionId` are nullable.
 
+`apiVersion` is the dated version of the envelope and `data` shapes. New fields are added without
+changing it; a new value means a breaking change. Deliveries from servers that predate the field
+do not carry it, and `WebhookEvent.ApiVersion` is null for them.
+
 ### Events
 
 `payment.succeeded`, `payment.failed`, `payment.requires_capture`, `payment.cancelled`,
-`payment.abandoned`, `payment.refunded`, `payment.disputed`. That is the whole set, exact case;
+`payment.abandoned`, `payment.refunded`, `payment.disputed`, and for stored-card charges and
+subscriptions `charge.succeeded`, `charge.retrying`, `charge.failed`, `agreement.activated`,
+`agreement.past_due`, `agreement.cancelled`. Exact case, constants on `WebhookEventTypes`;
 registering anything else is rejected.
 
 `payment.succeeded` is the only signal that means money is in hand. `requires_capture` includes
@@ -512,6 +532,41 @@ approved pre-auth holds, `cancelled` is a pre-completion void only, `abandoned` 
 verdict on a checkout that was never paid, and `refunded` fires once per refund from the refund
 ledger row rather than from the parent flipping status. `pending` and `processing` are not
 webhooked at all - poll session status if you want in-flight UX.
+
+`charge.*` fires for your own one-off charges (`ChargePaymentMethodAsync`) and for the periods the
+platform charges on an agreement; `data` is the charge plus the outcome detail, typed as
+`WebhookEvent.Charge`. `agreement.*` carries the agreement plus `previousStatus`, typed as
+`WebhookEvent.Agreement`. Both carry `data.sequence`.
+
+### Ordering
+
+Deliveries can arrive out of order. Keep the highest sequence you have processed per object and
+discard any event whose sequence is not higher; when you need current state, read the object by
+id. createdAt can repeat across events, so order by sequence, not createdAt. A sequence of 0 only
+comes from events recorded before the counter existed; treat it as older than any positive number.
+
+The object is the agreement (`data.id`) for `agreement.*`, the agreement period (`agreementId` +
+`periodNumber`) for a charge the platform places on an agreement, and the `chargeId` for a one-off
+charge. `OrderingKey` on `AgreementEventData` and `ChargeEventData` gives you that key, and
+`Sequence` is null on a delivery from a server that predates the field, which you can treat as 0.
+
+```csharp
+var evt = Webhooks.VerifyAndParse(body, signatureHeader, secret);
+if (evt.Charge is { } charge)
+{
+    var sequence = charge.Sequence ?? 0;
+    long? last = await store.LastSequenceAsync(charge.OrderingKey); // null when none yet
+    if (last is not null && sequence <= last)
+    {
+        return; // not newer than what you already applied
+    }
+
+    await ApplyAsync(charge);
+    await store.SaveSequenceAsync(charge.OrderingKey, sequence);
+}
+```
+
+`payment.*` events carry no sequence; dedupe them on `id` and read status when order matters.
 
 ### Delivery
 
