@@ -11,6 +11,17 @@
   data carry `sequence`. Both are optional: payloads from servers without them still parse, as
   null. Order those events by `Sequence` per `OrderingKey`, never by `createdAt`; see Ordering in
   the README. Signature verification is unchanged.
+- Refunds: new `CreateRefundAsync(transactionId, RefundRequest)` and
+  `GetRefundAsync(transactionId, refundId)`. The idempotency key is required and signed like a
+  charge; leave `Amount` null to refund everything still refundable (no `amount` is sent). The
+  create call answers once the refund is queued; poll `GetRefundAsync` or wait for
+  `payment.refunded`. New `Refund`, `RefundRequest`, `RefundStatuses`, `RefundErrorCodes`,
+  `RefundFailureCodes` and `DominaiteRefundException` (`DUPLICATE_REQUEST` and
+  `REFUND_NOT_FOUND` are retryable). A failed refund is a result with a `FailureCode`, and fires
+  no webhook.
+- `payment.*` webhook data is typed as `PaymentEventData` on `WebhookEvent.Payment`, including
+  `StoredPaymentMethod`: the same object as on the status read, null or absent when no card was
+  saved. It can be null even when a card was saved; the status read is the source of truth.
 
 ## 0.3.0
 

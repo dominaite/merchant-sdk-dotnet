@@ -530,6 +530,137 @@ public sealed class PaymentMethodCharge
 }
 
 /// <summary>
+/// The parameters for <see cref="DominaiteClient.CreateRefundAsync"/>. Leave
+/// <see cref="Amount"/> null to refund everything still refundable.
+/// </summary>
+/// <remarks>
+/// Property order here is the JSON order on the wire, and the body is serialized exactly once:
+/// the bytes that are hashed for the signature are the bytes that are sent. Null members are
+/// omitted, so a full refund sends no <c>amount</c> key at all.
+/// </remarks>
+public sealed class RefundRequest
+{
+    /// <summary>
+    /// The amount to refund in MINOR units of the payment's currency (2500 is 25.00 EUR, 1500 is
+    /// 1,500 HUF), at least 1. Null refunds everything still refundable. Partial refunds add up:
+    /// the amount may not exceed what is left after earlier refunds and refunds in progress.
+    /// </summary>
+    public long? Amount { get; set; }
+
+    /// <summary>Free text stored with the refund, at most 500 characters.</summary>
+    public string? Reason { get; set; }
+
+    /// <summary>
+    /// The idempotency key. Required, and signed exactly like a charge: it travels in the header
+    /// and in the signature, never in the body.
+    /// </summary>
+    /// <remarks>
+    /// Derive it from YOUR refund (the return or credit-note id), for example with
+    /// <see cref="IdempotencyKeys.ForOrder"/> and scope "refund", and send the same key when you
+    /// retry: the same key names the same refund and never refunds twice. A refund that ended
+    /// <c>failed</c> keeps its key, so a new attempt needs a new one. Null or blank is rejected
+    /// before anything is sent.
+    /// </remarks>
+    [JsonIgnore]
+    public string? IdempotencyKey { get; set; }
+}
+
+/// <summary>
+/// The refund status wire values, as constants plus the enumerable
+/// <see cref="RefundStatuses.All"/>.
+/// </summary>
+public static class RefundStatuses
+{
+    /// <summary>Accepted and queued, behind another refund of the same payment or not yet picked up.</summary>
+    public const string Pending = "pending";
+
+    /// <summary>With the payment provider now.</summary>
+    public const string Processing = "processing";
+
+    /// <summary>The money was returned to the payer. Final.</summary>
+    public const string Succeeded = "succeeded";
+
+    /// <summary>
+    /// The refund did not happen; read <see cref="Refund.FailureCode"/>. Final for this key: a new
+    /// attempt needs a new idempotency key.
+    /// </summary>
+    public const string Failed = "failed";
+
+    /// <summary>The whole vocabulary, in the order the canonical contract lists it.</summary>
+    public static IReadOnlyList<string> All { get; } = [Pending, Processing, Succeeded, Failed];
+}
+
+/// <summary>
+/// What <see cref="DominaiteClient.CreateRefundAsync"/> and
+/// <see cref="DominaiteClient.GetRefundAsync"/> return. The create call answers once the refund
+/// is queued, not done: read it back with GetRefundAsync, or wait for the
+/// <c>payment.refunded</c> webhook. A failed refund sends no webhook, so poll if you need to know
+/// about failures.
+/// </summary>
+/// <remarks>
+/// The gateway omits null fields on the wire; the SDK reads absent as null.
+/// </remarks>
+public sealed class Refund
+{
+    /// <summary>
+    /// <c>re_</c> followed by 32 hex characters. The same key on the same payment always names the
+    /// same refund.
+    /// </summary>
+    public string RefundId { get; set; } = string.Empty;
+
+    /// <summary>The payment being refunded.</summary>
+    public string TransactionId { get; set; } = string.Empty;
+
+    /// <summary>One of the <see cref="RefundStatuses"/> values.</summary>
+    public string Status { get; set; } = string.Empty;
+
+    /// <summary>
+    /// MINOR units. On <c>pending</c>, the amount requested (null for a full refund); on
+    /// <c>processing</c>, the amount being refunded (null until a full refund has been sized);
+    /// on <c>succeeded</c>, the amount actually refunded; always null on <c>failed</c>.
+    /// </summary>
+    public long? Amount { get; set; }
+
+    /// <summary>ISO 4217 code of the payment.</summary>
+    public string Currency { get; set; } = string.Empty;
+
+    /// <summary>
+    /// On <c>failed</c> only: one of the <see cref="RefundFailureCodes"/> values. Treat a value
+    /// not listed there as <c>REFUND_FAILED</c>.
+    /// </summary>
+    public string? FailureCode { get; set; }
+
+    /// <summary>On <c>failed</c> only: a fixed English explanation of <see cref="FailureCode"/>.</summary>
+    public string? FailureMessage { get; set; }
+
+    /// <summary>When the refund reached <c>succeeded</c> or <c>failed</c> (UTC); null before that.</summary>
+    public DateTimeOffset? CompletedAt { get; set; }
+
+    /// <summary>
+    /// The unwrapped refund object as the gateway sent it, for fields this class does not model
+    /// yet.
+    /// </summary>
+    [JsonIgnore]
+    public JsonElement Raw { get; set; }
+
+    /// <summary>True only for <c>succeeded</c>: the money went back to the payer.</summary>
+    [JsonIgnore]
+    public bool IsSucceeded => string.Equals(this.Status, RefundStatuses.Succeeded, StringComparison.Ordinal);
+
+    /// <summary>
+    /// False while the refund can still change, true once it cannot. An unrecognised status is
+    /// reported as NOT terminal, so a status the API adds later keeps you polling.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsTerminal => this.Status switch
+    {
+        RefundStatuses.Succeeded => true,
+        RefundStatuses.Failed => true,
+        _ => false,
+    };
+}
+
+/// <summary>
 /// What <see cref="DominaiteClient.PingAsync"/> returns: proof that your key, secret, signing and
 /// clock are all good, without creating anything.
 /// </summary>

@@ -7,8 +7,9 @@ namespace Dominaite.MerchantSdk.Tests;
 
 /// <summary>
 /// <see cref="Webhooks.VerifyAndParse(string, string, string, int, long?)"/>: the envelope
-/// (<c>apiVersion</c>, <c>createdAt</c>), the typed <c>agreement.*</c> and <c>charge.*</c> data
-/// with their <c>sequence</c>, and payloads from servers that predate those fields.
+/// (<c>apiVersion</c>, <c>createdAt</c>), the typed <c>payment.*</c> data with its
+/// <c>storedPaymentMethod</c>, the typed <c>agreement.*</c> and <c>charge.*</c> data with their
+/// <c>sequence</c>, and payloads from servers that predate those fields.
 /// </summary>
 public class WebhookEventTests
 {
@@ -22,6 +23,11 @@ public class WebhookEventTests
     private const string CanonicalHeader = "t=1755700000,v1=5305bcf1302fdaba8f8c19a20c899e916fb4d2a7d8d547c62529ff87c4697b72";
 
     private const string PaymentBody = """{"id":"7f9c24e5-1d1f-4c0a-9b6c-2f3a4d5e6f70","type":"payment.succeeded","apiVersion":"2026-09-25","createdAt":"2026-09-25T10:00:00Z","data":{"transactionId":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","status":"succeeded","amount":8440,"currency":"EUR"}}""";
+
+    // A saveCard payment as the gateway serializes it: nulls present, the stored card alongside.
+    private const string SavedCardPaymentBody = """{"id":"7f9c24e5-1d1f-4c0a-9b6c-2f3a4d5e6f71","type":"payment.succeeded","apiVersion":"2026-09-25","createdAt":"2026-09-25T10:00:00Z","data":{"transactionId":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","status":"succeeded","previousStatus":"pending","kind":"sale","amount":2500,"grossAmount":2500,"surchargeAmount":null,"currency":"EUR","paymentMethod":"card","walletType":null,"originalTransactionId":null,"idempotencyKey":"checkout-order-1042-2500-EUR","orderReference":"order-1042","orderId":"dom_9a8b7c6d5e4f","description":null,"paymentMethodBrand":"visa","paymentMethodLast4":"4242","storedPaymentMethod":{"id":"pm_0123456789abcdef0123456789abcdef","brand":"visa","last4":"4242","expiryMonth":12,"expiryYear":2030,"status":"active","retiredReason":null}}}""";
+
+    private const string RefundedBody = """{"id":"7f9c24e5-1d1f-4c0a-9b6c-2f3a4d5e6f72","type":"payment.refunded","apiVersion":"2026-09-25","createdAt":"2026-09-26T10:05:40Z","data":{"transactionId":"5b6c7d8e-9f0a-4b1c-8d2e-3f4a5b6c7d8e","status":"succeeded","previousStatus":null,"kind":"refund","amount":1000,"grossAmount":1000,"surchargeAmount":null,"currency":"EUR","paymentMethod":"card","walletType":null,"originalTransactionId":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","idempotencyKey":null,"orderReference":"order-1042","orderId":null,"description":null,"paymentMethodBrand":"visa","paymentMethodLast4":"4242","storedPaymentMethod":null}}""";
 
     private const string AgreementBody = """{"id":"a1b2c3d4-0000-4000-8000-000000000001","type":"agreement.past_due","apiVersion":"2026-09-25","createdAt":"2026-09-25T10:00:00.1234567Z","data":{"id":"agr_0123456789abcdef0123456789abcdef","planId":"plan_0123456789abcdef0123456789abcdef","customerReference":"cust-42","storedPaymentMethodId":"pm_0123456789abcdef0123456789abcdef","status":"past_due","previousStatus":"active","amount":2500,"currency":"EUR","intervalUnit":"month","intervalCount":1,"periodCount":null,"trialDays":0,"nextChargeAt":"2026-10-01T00:00:00Z","activatedAt":"2026-09-01T00:00:00Z","cancelledAt":null,"version":1,"sequence":3}}""";
 
@@ -57,6 +63,105 @@ public class WebhookEventTests
         Assert.Equal(8440, evt.Data.GetProperty("amount").GetInt64());
         Assert.Null(evt.Agreement);
         Assert.Null(evt.Charge);
+    }
+
+    [Fact]
+    public void APaymentEventIsTyped()
+    {
+        var evt = Parse(PaymentBody);
+
+        var payment = Assert.IsType<PaymentEventData>(evt.Payment);
+        Assert.Equal("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0", payment.TransactionId);
+        Assert.Equal(TransactionStatuses.Succeeded, payment.Status);
+        Assert.Equal(8440, payment.Amount);
+        Assert.Equal("EUR", payment.Currency);
+        Assert.Equal(8440, payment.Raw.GetProperty("amount").GetInt64());
+
+        // A payment without a saved card: the field is simply absent.
+        Assert.Null(payment.StoredPaymentMethod);
+        Assert.Null(Parse(AgreementBody).Payment);
+        Assert.Null(Parse(OneOffChargeBody).Payment);
+    }
+
+    [Fact]
+    public void TheCanonicalVectorReadsItsAmountsTyped()
+    {
+        var payment = Webhooks.VerifyAndParse(
+            CanonicalBody, CanonicalHeader, Secret, Webhooks.DefaultToleranceSeconds, 1755700000 + 10).Payment!;
+
+        Assert.Equal(8440, payment.Amount);
+        Assert.Equal(8701, payment.GrossAmount);
+        Assert.Equal(261, payment.SurchargeAmount);
+        Assert.Equal("pending", payment.PreviousStatus);
+        Assert.Equal("sale", payment.Kind);
+        Assert.Null(payment.OriginalTransactionId);
+        Assert.Equal("order-123", payment.IdempotencyKey);
+        Assert.Null(payment.StoredPaymentMethod);
+    }
+
+    [Fact]
+    public void APaymentThatSavedACardCarriesTheStoredPaymentMethod()
+    {
+        var payment = Parse(SavedCardPaymentBody).Payment!;
+
+        Assert.Equal("order-1042", payment.OrderReference);
+        Assert.Equal("dom_9a8b7c6d5e4f", payment.OrderId);
+        Assert.Equal("card", payment.PaymentMethod);
+        Assert.Equal("visa", payment.PaymentMethodBrand);
+        Assert.Equal("4242", payment.PaymentMethodLast4);
+        Assert.Null(payment.SurchargeAmount);
+        Assert.Null(payment.Description);
+
+        var method = Assert.IsType<StoredPaymentMethod>(payment.StoredPaymentMethod);
+        Assert.Equal("pm_0123456789abcdef0123456789abcdef", method.Id);
+        Assert.Equal("visa", method.Brand);
+        Assert.Equal("4242", method.Last4);
+        Assert.Equal(12, method.ExpiryMonth);
+        Assert.Equal(2030, method.ExpiryYear);
+        Assert.Equal(StoredPaymentMethodStatuses.Active, method.Status);
+        Assert.Null(method.RetiredReason);
+        Assert.True(method.IsChargeable);
+    }
+
+    [Fact]
+    public void AnExplicitNullStoredPaymentMethodReadsAsNull()
+    {
+        var body = SavedCardPaymentBody[..SavedCardPaymentBody.IndexOf("\"storedPaymentMethod\"", StringComparison.Ordinal)]
+            + "\"storedPaymentMethod\":null}}";
+
+        var payment = Parse(body).Payment!;
+
+        Assert.Null(payment.StoredPaymentMethod);
+        Assert.Equal("order-1042", payment.OrderReference);
+    }
+
+    [Fact]
+    public void ARetiredStoredPaymentMethodCarriesItsReason()
+    {
+        var body = SavedCardPaymentBody.Replace(
+            "\"status\":\"active\",\"retiredReason\":null",
+            "\"status\":\"retired\",\"retiredReason\":\"hard_decline\"",
+            StringComparison.Ordinal);
+        Assert.NotEqual(SavedCardPaymentBody, body);
+
+        var method = Parse(body).Payment!.StoredPaymentMethod!;
+
+        Assert.Equal(StoredPaymentMethodStatuses.Retired, method.Status);
+        Assert.Equal(StoredPaymentMethodRetiredReasons.HardDecline, method.RetiredReason);
+        Assert.False(method.IsChargeable);
+    }
+
+    [Fact]
+    public void APaymentRefundedEventNamesTheRefundedPayment()
+    {
+        var evt = Parse(RefundedBody);
+
+        Assert.Equal(WebhookEventTypes.PaymentRefunded, evt.Type);
+        var payment = evt.Payment!;
+        Assert.Equal("5b6c7d8e-9f0a-4b1c-8d2e-3f4a5b6c7d8e", payment.TransactionId);
+        Assert.Equal("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0", payment.OriginalTransactionId);
+        Assert.Equal(1000, payment.Amount);
+        Assert.Null(payment.StoredPaymentMethod);
     }
 
     [Fact]

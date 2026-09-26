@@ -43,6 +43,12 @@ public sealed class DominaiteClient : IDisposable
     /// </summary>
     public const string PaymentMethodsPath = "/merchant-api/payment-methods";
 
+    /// <summary>
+    /// The payments path. POST <c>PaymentsPath/{transactionId}/refunds</c> refunds a payment; GET
+    /// <c>PaymentsPath/{transactionId}/refunds/{refundId}</c> reads one refund.
+    /// </summary>
+    public const string PaymentsPath = "/merchant-api/payments";
+
     /// <summary>This SDK's version, reported in the User-Agent.</summary>
     public const string Version = "0.3.0";
 
@@ -63,11 +69,11 @@ public sealed class DominaiteClient : IDisposable
     };
 
     /// <summary>
-    /// A payment method id is one path segment and nothing else: it is interpolated into the
-    /// signed path, so anything that could split, escape or extend that path is refused before
+    /// A payment method or refund id is one path segment and nothing else: it is interpolated into
+    /// the signed path, so anything that could split, escape or extend that path is refused before
     /// signing.
     /// </summary>
-    private static readonly Regex PaymentMethodIdPattern = new("^[A-Za-z0-9_-]{1,100}$", RegexOptions.CultureInvariant);
+    private static readonly Regex IdSegmentPattern = new("^[A-Za-z0-9_-]{1,100}$", RegexOptions.CultureInvariant);
 
     /// <summary>What a 204 unwraps to: a payload with nothing in it.</summary>
     private static readonly JsonElement EmptyPayload = ParseEmptyObject();
@@ -322,12 +328,7 @@ public sealed class DominaiteClient : IDisposable
     {
         ArgumentNullException.ThrowIfNull(transactionId);
 
-        var normalized = transactionId.Trim().ToLowerInvariant();
-        if (!Guid.TryParseExact(normalized, "D", out _))
-        {
-            throw new DominaiteValidationException(
-                "transactionId must be the UUID returned by CreateCheckoutSessionAsync");
-        }
+        var normalized = NormalizeTransactionId(transactionId);
 
         // GET signs an EMPTY idempotency key and an EMPTY body, and sends no Idempotency-Key
         // header.
@@ -473,6 +474,102 @@ public sealed class DominaiteClient : IDisposable
         }
 
         throw reply.Rejection();
+    }
+
+    /// <summary>
+    /// Refunds a payment, in full or in part. The refund runs asynchronously: this returns once it
+    /// is queued (HTTP 202), usually with status <c>pending</c>.
+    /// </summary>
+    /// <remarks>
+    /// Read the outcome with <see cref="GetRefundAsync"/>, or wait for the <c>payment.refunded</c>
+    /// webhook, which fires when the money has moved and carries this payment as
+    /// <c>originalTransactionId</c>. A failed refund sends no webhook: poll if you need to know about
+    /// failures. A replay of the same key returns the refund as it stands now, so it doubles as a
+    /// status read. What throws <see cref="DominaiteRefundException"/> is the gateway answering with
+    /// a code instead of a refund; <c>PAYMENT_NOT_REFUNDABLE</c> and <c>REFUND_AMOUNT_EXCEEDED</c>
+    /// queue nothing and leave the key unused.
+    /// </remarks>
+    /// <param name="transactionId">The payment to refund: the id a checkout session or a charge returned.</param>
+    /// <param name="request">
+    /// The refund parameters. <see cref="RefundRequest.IdempotencyKey"/> is required: derive it from
+    /// your own refund (return or credit-note id).
+    /// </param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The refund as queued.</returns>
+    /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
+    /// <exception cref="DominaiteRefundException">The gateway answered with an error code; inspect Code.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaiteApiException">An unexpected response.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; nothing was queued, retry with the same key.</exception>
+    public async Task<Refund> CreateRefundAsync(
+        string transactionId,
+        RefundRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(transactionId);
+        ArgumentNullException.ThrowIfNull(request);
+
+        var id = NormalizeTransactionId(transactionId);
+        var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
+        var body = SerializeBody(request);
+        var path = $"{PaymentsPath}/{id}/refunds";
+
+        ApiReply reply;
+        try
+        {
+            reply = await this.SendAsync(HttpMethod.Post, path, body, idempotencyKey, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (DominaiteException error)
+        {
+            error.IdempotencyKey = idempotencyKey;
+            throw;
+        }
+
+        try
+        {
+            return reply.ReadRefund();
+        }
+        catch (DominaiteException error)
+        {
+            error.IdempotencyKey = idempotencyKey;
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Reads one refund of a payment.
+    /// </summary>
+    /// <remarks>
+    /// Poll it after <see cref="CreateRefundAsync"/> until <see cref="Refund.IsTerminal"/>. Right
+    /// after the create call the refund may not have been picked up yet: a
+    /// <see cref="DominaiteRefundException"/> with code <c>REFUND_NOT_FOUND</c> is retryable for up
+    /// to 60 seconds, after that the id is unknown.
+    /// </remarks>
+    /// <param name="transactionId">The payment the refund belongs to.</param>
+    /// <param name="refundId">The <see cref="Refund.RefundId"/> the create call returned.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The refund as it stands now.</returns>
+    /// <exception cref="DominaiteValidationException">Bad arguments; nothing was sent.</exception>
+    /// <exception cref="DominaiteRefundException">The gateway answered with an error code; inspect Code.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaiteApiException">An unexpected response.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<Refund> GetRefundAsync(
+        string transactionId,
+        string refundId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(transactionId);
+        ArgumentNullException.ThrowIfNull(refundId);
+
+        var path = $"{PaymentsPath}/{NormalizeTransactionId(transactionId)}/refunds/{NormalizeRefundId(refundId)}";
+
+        // GET signs an EMPTY idempotency key and an EMPTY body, and sends no Idempotency-Key
+        // header.
+        var reply = await this.SendAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        return reply.ReadRefund();
     }
 
     /// <summary>Releases the HttpClient this instance created for itself.</summary>
@@ -753,6 +850,38 @@ public sealed class DominaiteClient : IDisposable
         }
 
         /// <summary>
+        /// The refund in <c>data</c> on a success, or the error the answer stands for: a
+        /// <see cref="DominaiteRefundException"/> for a coded 4xx other than credentials and rate
+        /// limiting, the generic rejection for everything else.
+        /// </summary>
+        public Refund ReadRefund()
+        {
+            if (this.Status >= 400)
+            {
+                var code = this.ErrorCode;
+                if (this.Status < 500 && code is not null && this.Status is not (401 or 403 or 429))
+                {
+                    throw new DominaiteRefundException(
+                        this.Status,
+                        code,
+                        this.ErrorMessage ?? "The refund was refused.",
+                        this.Envelope);
+                }
+
+                throw this.Rejection();
+            }
+
+            if (this.Data is not { } data || StringField(data, "refundId") is null)
+            {
+                throw new DominaiteApiException(this.Status, null, "The Dominaite API answered the refund without a refund body.");
+            }
+
+            var refund = Deserialize<Refund>(data, "refund");
+            refund.Raw = data;
+            return refund;
+        }
+
+        /// <summary>
         /// A <see cref="DominaiteStorefrontException"/> when the answer carries one of the
         /// <see cref="ErrorCodes.Storefront"/> codes, else null.
         /// </summary>
@@ -832,6 +961,21 @@ public sealed class DominaiteClient : IDisposable
         return JsonSerializer.Serialize(request, JsonOptions);
     }
 
+    /// <summary>
+    /// Validates a refund and returns the exact body bytes that get both signed and sent: amount
+    /// then reason, each only when set, so a full refund with no reason is <c>{}</c>.
+    /// </summary>
+    private static string SerializeBody(RefundRequest request)
+    {
+        if (request.Amount is <= 0)
+        {
+            throw new DominaiteValidationException(
+                "Amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR), or null to refund everything still refundable");
+        }
+
+        return JsonSerializer.Serialize(request, JsonOptions);
+    }
+
     private static void ValidateMoneyParams(long amount, string? currency, string? orderReference)
     {
         if (amount <= 0)
@@ -856,10 +1000,37 @@ public sealed class DominaiteClient : IDisposable
         }
     }
 
+    /// <summary>
+    /// A transaction id in the lowercase hyphenated form the gateway signs, or a validation error.
+    /// </summary>
+    private static string NormalizeTransactionId(string transactionId)
+    {
+        var normalized = transactionId.Trim().ToLowerInvariant();
+        if (!Guid.TryParseExact(normalized, "D", out _))
+        {
+            throw new DominaiteValidationException(
+                "transactionId must be the payment UUID returned by CreateCheckoutSessionAsync or a charge");
+        }
+
+        return normalized;
+    }
+
+    private static string NormalizeRefundId(string refundId)
+    {
+        var trimmed = refundId.Trim();
+        if (!IdSegmentPattern.IsMatch(trimmed))
+        {
+            throw new DominaiteValidationException(
+                "refundId must be the Refund.RefundId from CreateRefundAsync (letters, digits, _ or -, at most 100 characters)");
+        }
+
+        return trimmed;
+    }
+
     private static string NormalizePaymentMethodId(string paymentMethodId)
     {
         var trimmed = paymentMethodId.Trim();
-        if (!PaymentMethodIdPattern.IsMatch(trimmed))
+        if (!IdSegmentPattern.IsMatch(trimmed))
         {
             throw new DominaiteValidationException(
                 "paymentMethodId must be the StoredPaymentMethod id from GetStatusAsync (letters, digits, _ or -, at most 100 characters)");

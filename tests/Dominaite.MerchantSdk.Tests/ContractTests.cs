@@ -20,9 +20,10 @@ namespace Dominaite.MerchantSdk.Tests;
 /// <remarks>
 /// Besides the session surface, this pins the stored-payment-method vocabularies, field sets
 /// and examples: the saved-card status, a 201 charge, a 402 decline, every coded charge and
-/// revoke error, the bodiless revoke. Every example is pushed through the client twice: as
-/// spelled, and with its null members removed, because the gateway omits null fields on the
-/// wire.
+/// revoke error, the bodiless revoke. Refunds likewise: the 202 partial and full refund, the
+/// succeeded and failed status reads, every coded refund error and the three refund
+/// vocabularies. Every example is pushed through the client twice: as spelled, and with its null
+/// members removed, because the gateway omits null fields on the wire.
 /// </remarks>
 public class ContractTests
 {
@@ -30,7 +31,7 @@ public class ContractTests
     private const string Secret = "dms_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// <summary>The sha256 of the canonical fixture, shared across every SDK that vendors it.</summary>
-    private const string FixtureSha256 = "49d12e8788e6ad314f961652aa737b3a17789433e9b06ee47277b8877b95cf5f";
+    private const string FixtureSha256 = "3190a9297db562aa2c13fba6b2b3996a4a310478179bc4db4e1dc465938d6a92";
 
     private static readonly JsonSerializerOptions ReadOptions = new()
     {
@@ -81,6 +82,10 @@ public class ContractTests
     };
 
     private const string PaymentMethodId = "pm_0123456789abcdef0123456789abcdef";
+
+    private const string RefundTransactionId = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+
+    private static RefundRequest FullRefund() => new() { IdempotencyKey = "refund-rma-77" };
 
     private static ChargeRequest Charge() => new()
     {
@@ -802,6 +807,159 @@ public class ContractTests
             Assert.Equal(404, error.HttpStatus);
             Assert.Equal("VALIDATION_ERROR", error.Code);
             Assert.False(error.IsRetryable, form);
+        }
+    }
+
+    [Fact]
+    public void TheRefundVocabulariesAreExactlyTheContracts()
+    {
+        var contract = Contract();
+        Assert.Equal(Strings(contract.GetProperty("refundStatusVocabulary")), RefundStatuses.All);
+        Assert.Equal(Strings(contract.GetProperty("refundErrorCodes")), RefundErrorCodes.All);
+        Assert.Equal(Strings(contract.GetProperty("refundFailureCodes")), RefundFailureCodes.All);
+    }
+
+    [Fact]
+    public void BothRefundEndpointsMatchTheContract()
+    {
+        var create = Endpoint("createRefund");
+        Assert.Equal("POST", create.GetProperty("method").GetString());
+        Assert.Equal(DominaiteClient.PaymentsPath + "/{transactionId}/refunds", create.GetProperty("path").GetString());
+        Assert.Equal(202, create.GetProperty("httpStatus").GetInt32());
+        AssertFields<Refund>(Strings(create.GetProperty("fields")));
+
+        var read = Endpoint("getRefund");
+        Assert.Equal("GET", read.GetProperty("method").GetString());
+        Assert.Equal(DominaiteClient.PaymentsPath + "/{transactionId}/refunds/{refundId}", read.GetProperty("path").GetString());
+        Assert.Equal(200, read.GetProperty("httpStatus").GetInt32());
+        AssertFields<Refund>(Strings(read.GetProperty("fields")));
+
+        // The examples omit nulls the way the gateway does, so each carries a subset of the fields.
+        foreach (var (endpoint, name) in new[]
+        {
+            (create, "partialExample"), (create, "fullExample"), (read, "succeededExample"), (read, "failedExample"),
+        })
+        {
+            var fields = Strings(endpoint.GetProperty("fields"));
+            Assert.All(Keys(endpoint.GetProperty(name).GetProperty("data")), key => Assert.Contains(key, fields));
+        }
+    }
+
+    [Fact]
+    public void EveryRefundStatusRoundTripsAndOnlyTheFinalOnesAreTerminal()
+    {
+        var example = Endpoint("createRefund").GetProperty("partialExample").GetProperty("data");
+
+        foreach (var value in Strings(Contract().GetProperty("refundStatusVocabulary")))
+        {
+            var payload = JsonNode.Parse(example.GetRawText())!;
+            payload["status"] = value;
+
+            var refund = JsonSerializer.Deserialize<Refund>(payload.ToJsonString(), ReadOptions)!;
+
+            Assert.Equal(value, refund.Status);
+            Assert.Equal(value is RefundStatuses.Succeeded or RefundStatuses.Failed, refund.IsTerminal);
+            Assert.Equal(value == RefundStatuses.Succeeded, refund.IsSucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task ThePartialAndFullRefundExamplesComeBackAsRefunds()
+    {
+        var create = Endpoint("createRefund");
+        foreach (var (name, amount, currency) in new[] { ("partialExample", (long?)2500, "EUR"), ("fullExample", null, "HUF") })
+        {
+            var example = create.GetProperty(name);
+            foreach (var (form, body) in BothWireForms(example))
+            {
+                using var server = new MockServer(Reply.Raw(202, body));
+                using var client = ClientFor(server);
+
+                var refund = await client.CreateRefundAsync(RefundTransactionId, FullRefund());
+
+                var label = $"{name} ({form})";
+                Assert.Equal(example.GetProperty("data").GetProperty("refundId").GetString(), refund.RefundId);
+                Assert.Equal(RefundTransactionId, refund.TransactionId);
+                Assert.Equal(RefundStatuses.Pending, refund.Status);
+                Assert.True(amount == refund.Amount, label);
+                Assert.Equal(currency, refund.Currency);
+                Assert.Null(refund.FailureCode);
+                Assert.Null(refund.CompletedAt);
+                Assert.False(refund.IsTerminal, label);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TheSucceededAndFailedRefundExamplesReadBack()
+    {
+        var read = Endpoint("getRefund");
+
+        foreach (var (form, body) in BothWireForms(read.GetProperty("succeededExample")))
+        {
+            using var server = new MockServer(Reply.Raw(200, body));
+            using var client = ClientFor(server);
+
+            var refund = await client.GetRefundAsync(RefundTransactionId, "re_7c1e9a2b4d6f48a0b3c5d7e9f1a2b3c4");
+
+            Assert.Equal(RefundStatuses.Succeeded, refund.Status);
+            Assert.Equal(2500, refund.Amount);
+            Assert.Equal(DateTimeOffset.Parse("2026-09-26T10:05:40.12Z"), refund.CompletedAt);
+            Assert.True(refund.IsSucceeded, form);
+        }
+
+        foreach (var (form, body) in BothWireForms(read.GetProperty("failedExample")))
+        {
+            using var server = new MockServer(Reply.Raw(200, body));
+            using var client = ClientFor(server);
+
+            var refund = await client.GetRefundAsync(RefundTransactionId, "re_9e3a1c4d6f8b40c2d5e7f9a1b3c4d5e6");
+
+            // A failed refund never carries an amount.
+            Assert.Equal(RefundStatuses.Failed, refund.Status);
+            Assert.True(refund.Amount is null, form);
+            Assert.Equal(RefundFailureCodes.RefundFailed, refund.FailureCode);
+            Assert.Contains(refund.FailureCode, RefundFailureCodes.All);
+            Assert.NotNull(refund.FailureMessage);
+            Assert.True(refund.IsTerminal, form);
+        }
+    }
+
+    [Fact]
+    public async Task EveryRefundErrorExampleComesBackAsARefundException()
+    {
+        var codes = Strings(Contract().GetProperty("refundErrorCodes"));
+        var examples = new[] { "createRefund", "getRefund" }
+            .SelectMany(name => Endpoint(name).GetProperty("errorExamples").EnumerateArray().Select(example => (name, example)))
+            .ToList();
+        Assert.Equal(5, examples.Count);
+
+        foreach (var (name, example) in examples)
+        {
+            var httpStatus = example.GetProperty("httpStatus").GetInt32();
+            var code = example.GetProperty("code").GetString()!;
+            var body = example.GetProperty("body");
+            Assert.Contains(code, codes);
+            Assert.Equal(code, body.GetProperty("error").GetProperty("code").GetString());
+
+            foreach (var (form, wire) in BothWireForms(body))
+            {
+                var label = $"{name} {code} ({httpStatus}, {form})";
+                using var server = new MockServer(Reply.Raw(httpStatus, wire));
+                using var client = ClientFor(server);
+
+                var error = await Assert.ThrowsAsync<DominaiteRefundException>(
+                    () => name == "createRefund"
+                        ? client.CreateRefundAsync(RefundTransactionId, FullRefund())
+                        : client.GetRefundAsync(RefundTransactionId, "re_7c1e9a2b4d6f48a0b3c5d7e9f1a2b3c4"));
+
+                // REFUND_NOT_FOUND right after a 202 is the one example that polling fixes.
+                Assert.True(error.IsRetryable == (code == RefundErrorCodes.RefundNotFound), label);
+                Assert.Equal(httpStatus, error.HttpStatus);
+                Assert.Equal(code, error.Code);
+                Assert.Equal(body.GetProperty("error").GetProperty("message").GetString(), error.Message);
+                Assert.Equal(code, error.RawResult.GetProperty("error").GetProperty("code").GetString());
+            }
         }
     }
 }

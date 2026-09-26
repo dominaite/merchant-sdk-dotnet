@@ -79,9 +79,13 @@ public sealed class WebhookEvent
     /// </summary>
     public DateTimeOffset? CreatedAt { get; set; }
 
-    /// <summary>The event's <c>data</c> object as sent. Read <c>payment.*</c> fields from here.</summary>
+    /// <summary>The event's <c>data</c> object as sent, for every type.</summary>
     [JsonIgnore]
     public JsonElement Data { get; set; }
+
+    /// <summary>The <c>data</c> of a <c>payment.*</c> event, typed; null for every other type.</summary>
+    [JsonIgnore]
+    public PaymentEventData? Payment { get; set; }
 
     /// <summary>The <c>data</c> of an <c>agreement.*</c> event, typed; null for every other type.</summary>
     [JsonIgnore]
@@ -92,6 +96,104 @@ public sealed class WebhookEvent
     public ChargeEventData? Charge { get; set; }
 
     /// <summary>The whole envelope as received, for fields this class does not model yet.</summary>
+    [JsonIgnore]
+    public JsonElement Raw { get; set; }
+}
+
+/// <summary>
+/// The <c>data</c> of a <c>payment.*</c> event: the payment's transition, its amounts, your
+/// correlation fields and, when one was stored with the approval, the saved card.
+/// </summary>
+/// <remarks>
+/// <c>payment.*</c> events carry no sequence: dedupe them on <see cref="WebhookEvent.Id"/> and
+/// read the status when order matters. Nullable fields may arrive as null or be absent; both read
+/// as null.
+/// </remarks>
+public sealed class PaymentEventData
+{
+    /// <summary>
+    /// Dominaite's payment id, the same value the create call and the status read use. On
+    /// <c>payment.refunded</c> it is the refund's own id; the refunded payment is
+    /// <see cref="OriginalTransactionId"/>.
+    /// </summary>
+    public string TransactionId { get; set; } = string.Empty;
+
+    /// <summary>The status after the transition, one of the <see cref="TransactionStatuses"/> values.</summary>
+    public string Status { get; set; } = string.Empty;
+
+    /// <summary>The status before the transition, when there was one.</summary>
+    public string? PreviousStatus { get; set; }
+
+    /// <summary>What kind of transaction this is, e.g. <c>sale</c>; null when not classified.</summary>
+    public string? Kind { get; set; }
+
+    /// <summary>
+    /// What you are PAID, in MINOR units of <see cref="Currency"/>. On <c>payment.refunded</c> it
+    /// is the amount of that one refund.
+    /// </summary>
+    public long Amount { get; set; }
+
+    /// <summary>The card movement in MINOR units: <see cref="Amount"/> plus any surcharge.</summary>
+    public long GrossAmount { get; set; }
+
+    /// <summary>The surcharge portion in MINOR units; null when there was none.</summary>
+    public long? SurchargeAmount { get; set; }
+
+    /// <summary>ISO 4217 code.</summary>
+    public string Currency { get; set; } = string.Empty;
+
+    /// <summary>
+    /// How the payer paid, as a category (<c>card</c>, <c>wallet</c>, ...). Not the saved card:
+    /// that is <see cref="StoredPaymentMethod"/>.
+    /// </summary>
+    public string? PaymentMethod { get; set; }
+
+    /// <summary>The wallet, e.g. <c>apple_pay</c>, on wallet payments only.</summary>
+    public string? WalletType { get; set; }
+
+    /// <summary>
+    /// The earlier transaction this one hangs off: the refunded payment on
+    /// <c>payment.refunded</c>, the authorization on the <c>payment.succeeded</c> of a capture.
+    /// Null on events about an ordinary payment itself.
+    /// </summary>
+    public string? OriginalTransactionId { get; set; }
+
+    /// <summary>The idempotency key you sent on the create call. Null on refund and dispute events.</summary>
+    public string? IdempotencyKey { get; set; }
+
+    /// <summary>
+    /// Your own order reference as stored on the transaction; match events to your orders on it.
+    /// Refund and cancel events carry the reference of the original payment.
+    /// </summary>
+    public string? OrderReference { get; set; }
+
+    /// <summary>The hosted checkout order id, the same value as on the status read.</summary>
+    public string? OrderId { get; set; }
+
+    /// <summary>The description you sent on the create call, when you sent one.</summary>
+    public string? Description { get; set; }
+
+    /// <summary>Lower-cased card brand once a card payment was attempted.</summary>
+    public string? PaymentMethodBrand { get; set; }
+
+    /// <summary>Last four digits of the card once a card payment was attempted.</summary>
+    public string? PaymentMethodLast4 { get; set; }
+
+    /// <summary>
+    /// The card a <see cref="CheckoutSessionRequest.SaveCard"/> payment stored, with the same shape
+    /// and values as <see cref="CheckoutStatus.StoredPaymentMethod"/> on the status read. Null (or
+    /// absent) when no card was saved.
+    /// </summary>
+    /// <remarks>
+    /// It can ALSO be null when a card was saved: a card can be stored after the approval was
+    /// already announced, for example on a server-to-server sale that succeeded synchronously or
+    /// on a sale settled later by the platform. The status read is the source of truth, so on a
+    /// SaveCard session whose webhook has this null, read it with
+    /// <see cref="DominaiteClient.GetStatusAsync"/>.
+    /// </remarks>
+    public StoredPaymentMethod? StoredPaymentMethod { get; set; }
+
+    /// <summary>The <c>data</c> object as sent, for fields this class does not model yet.</summary>
     [JsonIgnore]
     public JsonElement Raw { get; set; }
 }

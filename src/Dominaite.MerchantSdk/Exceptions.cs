@@ -147,7 +147,8 @@ public sealed class DominaiteApiException : DominaiteException
 
 /// <summary>
 /// The gateway codes a checkout integration branches on, as constants. The stored-card codes live
-/// in <see cref="ChargeErrorCodes"/> and <see cref="RevokeErrorCodes"/>.
+/// in <see cref="ChargeErrorCodes"/> and <see cref="RevokeErrorCodes"/>, the refund codes in
+/// <see cref="RefundErrorCodes"/>.
 /// </summary>
 public static class ErrorCodes
 {
@@ -402,6 +403,119 @@ public sealed class DominaiteRevokeException : DominaiteException
 
     /// <summary>The whole envelope exactly as received, for fields the typed surface does not model.</summary>
     public JsonElement RawResult { get; }
+}
+
+/// <summary>
+/// The codes <see cref="DominaiteClient.CreateRefundAsync"/> and
+/// <see cref="DominaiteClient.GetRefundAsync"/> throw as a <see cref="DominaiteRefundException"/>,
+/// in the order the canonical contract lists them. A 5xx is none of these: nothing was queued, and
+/// it arrives as a retryable <see cref="DominaiteTransportException"/>.
+/// </summary>
+public static class RefundErrorCodes
+{
+    /// <summary>HTTP 404: no card-not-present payment with this id under your account.</summary>
+    public const string PaymentNotFound = "PAYMENT_NOT_FOUND";
+
+    /// <summary>
+    /// HTTP 404, status read only: no refund with this id on this payment. Right after the create
+    /// call the refund may not have been picked up yet: retryable, poll again for up to 60 seconds.
+    /// After that the id is unknown.
+    /// </summary>
+    public const string RefundNotFound = "REFUND_NOT_FOUND";
+
+    /// <summary>
+    /// HTTP 422: the payment is not paid, is already fully refunded, or everything left on it is
+    /// already being refunded. Nothing was queued and the key is not burnt.
+    /// </summary>
+    public const string PaymentNotRefundable = "PAYMENT_NOT_REFUNDABLE";
+
+    /// <summary>
+    /// HTTP 422: the amount is more than what is left to refund, counting refunds in progress; the
+    /// message names the amount left. Nothing was queued and the key is not burnt.
+    /// </summary>
+    public const string RefundAmountExceeded = "REFUND_AMOUNT_EXCEEDED";
+
+    /// <summary>HTTP 422: this key was first used for a different amount, reason or payment. Use a fresh key.</summary>
+    public const string IdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED";
+
+    /// <summary>
+    /// HTTP 409: a request with this key is being processed right now. Retryable: send the SAME key
+    /// again after a second, for up to 120 seconds.
+    /// </summary>
+    public const string DuplicateRequest = "DUPLICATE_REQUEST";
+
+    /// <summary>HTTP 400: the Idempotency-Key header is missing or longer than 100 characters.</summary>
+    public const string IdempotencyKeyRequired = "IDEMPOTENCY_KEY_REQUIRED";
+
+    /// <summary>
+    /// The whole vocabulary, in the order the canonical contract lists it. An unlisted code still
+    /// arrives as a <see cref="DominaiteRefundException"/>.
+    /// </summary>
+    public static IReadOnlyList<string> All { get; } =
+    [
+        PaymentNotFound,
+        RefundNotFound,
+        PaymentNotRefundable,
+        RefundAmountExceeded,
+        IdempotencyKeyReused,
+        DuplicateRequest,
+        IdempotencyKeyRequired,
+    ];
+}
+
+/// <summary>
+/// The values <see cref="Refund.FailureCode"/> carries on a refund whose status is
+/// <c>failed</c>. These are not exceptions: a failed refund is a result. Treat a value not listed
+/// here as <see cref="RefundFailed"/>.
+/// </summary>
+public static class RefundFailureCodes
+{
+    /// <summary>The amount was more than what was left to refund by the time the refund ran.</summary>
+    public const string RefundAmountExceeded = "REFUND_AMOUNT_EXCEEDED";
+
+    /// <summary>The payment could no longer be refunded by the time the refund ran.</summary>
+    public const string PaymentNotRefundable = "PAYMENT_NOT_REFUNDABLE";
+
+    /// <summary>The refund could not be completed. Retry with a new idempotency key if it is still wanted.</summary>
+    public const string RefundFailed = "REFUND_FAILED";
+
+    /// <summary>The whole vocabulary, in the order the canonical contract lists it.</summary>
+    public static IReadOnlyList<string> All { get; } = [RefundAmountExceeded, PaymentNotRefundable, RefundFailed];
+}
+
+/// <summary>
+/// The gateway answered a refund call with an error code instead of a refund: HTTP 400, 404, 409
+/// or 422. Branch on <see cref="DominaiteException.Code"/>; see <see cref="RefundErrorCodes"/>.
+/// </summary>
+/// <remarks>
+/// <see cref="DominaiteException.IsRetryable"/> is true for <c>DUPLICATE_REQUEST</c> (retry the
+/// SAME key for up to 120 seconds) and <c>REFUND_NOT_FOUND</c> (poll again for up to 60 seconds
+/// right after the create call), false for the rest. A failed refund is NOT this exception: it is a
+/// <see cref="Refund"/> with status <c>failed</c> and a <see cref="Refund.FailureCode"/>.
+/// Credentials failures stay <see cref="DominaiteAuthException"/>, and a 5xx is a
+/// <see cref="DominaiteTransportException"/> (nothing was queued; retry with the same key).
+/// </remarks>
+public sealed class DominaiteRefundException : DominaiteException
+{
+    /// <summary>Initializes a new instance of the <see cref="DominaiteRefundException"/> class.</summary>
+    /// <param name="httpStatus">The HTTP status code.</param>
+    /// <param name="code">The machine-readable reason. See <see cref="RefundErrorCodes"/>.</param>
+    /// <param name="message">The human-readable reason from the API.</param>
+    /// <param name="rawResult">The whole envelope, as received.</param>
+    public DominaiteRefundException(int httpStatus, string code, string message, JsonElement rawResult)
+        : base(message)
+    {
+        this.HttpStatus = httpStatus;
+        this.Code = code;
+        this.RawResult = rawResult;
+    }
+
+    /// <summary>The whole envelope exactly as received, for fields the typed surface does not model.</summary>
+    public JsonElement RawResult { get; }
+
+    /// <inheritdoc />
+    public override bool IsRetryable
+        => this.Code is RefundErrorCodes.DuplicateRequest or RefundErrorCodes.RefundNotFound;
 }
 
 /// <summary>

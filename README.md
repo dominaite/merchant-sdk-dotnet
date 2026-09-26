@@ -463,14 +463,15 @@ handlers that hold the raw request bytes.
 
 `Webhooks.VerifyAndParse` takes the same arguments, verifies first, and only then parses the body
 into a typed `WebhookEvent`: `Id`, `Type`, `ApiVersion`, `CreatedAt`, `Data` (the raw `data`
-object), plus `Agreement` or `Charge` typed for `agreement.*` and `charge.*` events. A body that
-verifies but is not a readable envelope throws with `WebhookFailureReason.MalformedPayload`.
+object), plus `Payment`, `Agreement` or `Charge` typed for `payment.*`, `agreement.*` and
+`charge.*` events. A body that verifies but is not a readable envelope throws with
+`WebhookFailureReason.MalformedPayload`.
 
 ```csharp
 var evt = Webhooks.VerifyAndParse(body, signatureHeader, secret);
-if (evt.Type == WebhookEventTypes.PaymentSucceeded)
+if (evt.Type == WebhookEventTypes.PaymentSucceeded && evt.Payment is { } payment)
 {
-    var transactionId = evt.Data.GetProperty("transactionId").GetString();
+    await FulfilAsync(payment.OrderReference, payment.TransactionId);
 }
 ```
 
@@ -537,6 +538,32 @@ webhooked at all - poll session status if you want in-flight UX.
 platform charges on an agreement; `data` is the charge plus the outcome detail, typed as
 `WebhookEvent.Charge`. `agreement.*` carries the agreement plus `previousStatus`, typed as
 `WebhookEvent.Agreement`. Both carry `data.sequence`.
+
+### The saved card on payment events
+
+`payment.*` data carries `storedPaymentMethod` (`WebhookEvent.Payment.StoredPaymentMethod`), the
+same `StoredPaymentMethod` object as on the status read: id, brand, last four, expiry, status
+(`active`, `revoked`, `expired`, `retired`) and `RetiredReason` (`hard_decline`, `chargeback`,
+`source_sale_reversed`, or null). It is set on `payment.succeeded` (and `payment.requires_capture`
+for an authorization) when the card was stored together with the approval, and null or absent
+otherwise.
+
+It can also be null when a card WAS saved: a card can be stored after the approval was already
+announced, for example on a server-to-server sale that succeeded synchronously or on a sale the
+platform settled later. The status read is the source of truth, so on a `SaveCard` session whose
+webhook has no `storedPaymentMethod`, read it with `GetStatusAsync`.
+
+```csharp
+if (evt.Payment?.StoredPaymentMethod is { IsChargeable: true } method)
+{
+    await StoreForCustomerAsync(customerId, method.Id); // pm_...
+}
+else if (evt.Type == WebhookEventTypes.PaymentSucceeded && sessionAskedToSaveCard)
+{
+    var status = await client.GetStatusAsync(evt.Payment!.TransactionId);
+    // status.StoredPaymentMethod is authoritative
+}
+```
 
 ### Ordering
 
@@ -627,6 +654,7 @@ machine-readable string where there is one.
 | `DominaiteAuthException` | 401/403. `Code` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
 | `DominaiteTransportException` | Network failure, timeout, or a 5xx on session create, status or ping, including one whose body is an HTML error page from a proxy. `Code` keeps the gateway's code when the 5xx carried one. | Retry with the **same** idempotency key. `IsRetryable` is always true here, and elsewhere only for `PAYMENT_PROCESSING_UNAVAILABLE`. |
 | `DominaiteChargeException` | `ChargePaymentMethodAsync` got an error code instead of a charge: 409, 422, 502 or 503. Carries `Charge`, `TransactionId` and `RawResult`. | Branch on `Code` (see [Stored payment methods](#stored-payment-methods-recurring)). `CHARGE_OUTCOME_UNKNOWN` carries the `TransactionId` to poll; never retry it under a new key. |
+| `DominaiteRefundException` | `CreateRefundAsync` or `GetRefundAsync` got an error code instead of a refund: 400, 404, 409 or 422. Carries `RawResult`. | Branch on `Code` (see [Refunds](#refunds)). `IsRetryable` is true for `DUPLICATE_REQUEST` and `REFUND_NOT_FOUND`. |
 | `DominaiteRevokeException` | `RevokePaymentMethodAsync` was refused: 502 `UPSTREAM_CONTRACT_ERROR` or 503 `MERCHANT_API_UNAVAILABLE`. Nothing changed. | Retry later on 503; contact support on 502. |
 | `DominaiteApiException` | Any other rejecting or unexpected response, including a 3xx. `Code` carries the API's reason when it sent one, e.g. `IDEMPOTENCY_KEY_REQUIRED` on a 400, `PAYMENT_METHOD_NOT_FOUND` on a charge 404. | Inspect `HttpStatus` and `Code`. A 404 from `GetStatusAsync` is an unknown transaction id. |
 | `DominaiteValidationException` | Bad arguments (non-positive amount, missing field, missing idempotency key, malformed key id). | Fix the call; nothing was sent. |
@@ -671,12 +699,71 @@ catch (DominaiteStorefrontException error) when (error.Code == ErrorCodes.Storef
 }
 ```
 
-## Refunds, captures and voids
+## Refunds
 
-They are issued from the Dominaite dashboard by design - one audited, human-confirmed path for
-money moving back. The merchant API is deliberately create-and-read; do not build refund automation
-against it. If your order flow cancels an order, record it on your side and issue the refund from
-the dashboard.
+`CreateRefundAsync` refunds a payment you took through a checkout session or a charge, in full or
+in part. The amount is in minor units of the payment's currency, so convert it with `MinorUnits`
+like any other amount. The idempotency key is required and signed, exactly like a charge: derive it
+from YOUR refund (the return or credit-note id), and send the same key when you retry. The same key
+names the same refund and never refunds twice.
+
+```csharp
+var refund = await client.CreateRefundAsync(transactionId, new RefundRequest
+{
+    Amount = MinorUnits.From(1500m, "HUF"), // 1500: HUF has 0 decimals on the gateway
+    Reason = "Returned item",
+    IdempotencyKey = IdempotencyKeys.ForOrder("refund", "rma-77", 1500, "HUF"),
+});
+// refund.Status is "pending": queued, not done yet.
+```
+
+Leave `Amount` null to refund everything still refundable; the SDK then sends no `amount` at all.
+Partial refunds add up, and the amount may not exceed what is left after earlier refunds and
+refunds still in progress. `Reason` is optional free text, at most 500 characters.
+
+The call answers once the refund is queued (HTTP 202), so the outcome comes later. Read it with
+`GetRefundAsync`, or wait for `payment.refunded`:
+
+```csharp
+var current = await client.GetRefundAsync(transactionId, refund.RefundId);
+if (current.IsTerminal && !current.IsSucceeded)
+{
+    // current.FailureCode says why; a new attempt needs a new idempotency key.
+}
+```
+
+`Status` is `pending`, `processing`, `succeeded` or `failed` (constants on `RefundStatuses`); only
+`succeeded` and `failed` are final. `Amount` is the amount requested on `pending` (null for
+a full refund), the amount being refunded on `processing` (null until a full refund has been
+sized), the amount actually refunded on `succeeded`, and always null on `failed`. A failed
+refund is a result, not an exception: `FailureCode` is `REFUND_AMOUNT_EXCEEDED`,
+`PAYMENT_NOT_REFUNDABLE` or `REFUND_FAILED` (`RefundFailureCodes`); treat any other value as
+`REFUND_FAILED`. `failed` is final for that key.
+
+When the money has moved, `payment.refunded` fires once for that refund: `data.transactionId` is
+the refund's own transaction id, `data.amount` is that refund's amount, and
+`data.originalTransactionId` is the payment you refunded. A failed refund fires no webhook, so poll
+`GetRefundAsync` if you need to know about failures.
+
+A refund call that the gateway refuses throws `DominaiteRefundException`; codes on
+`RefundErrorCodes`:
+
+- `PAYMENT_NOT_FOUND` (404) - no card-not-present payment with this id under your account.
+- `REFUND_NOT_FOUND` (404, status read only) - right after the create call the refund may not be
+  picked up yet. Retryable: poll again for up to 60 seconds.
+- `PAYMENT_NOT_REFUNDABLE` (422) - not paid, already fully refunded, or everything left is already
+  being refunded. Nothing was queued and the key is not used up.
+- `REFUND_AMOUNT_EXCEEDED` (422) - more than what is left to refund; the message names the amount
+  left. Nothing was queued and the key is not used up.
+- `IDEMPOTENCY_KEY_REUSED` (422) - this key was first used for a different amount, reason or
+  payment. Use a fresh key.
+- `DUPLICATE_REQUEST` (409) - a request with this key is in progress. Retryable: send the SAME key
+  again after a second, for up to 120 seconds.
+- `IDEMPOTENCY_KEY_REQUIRED` (400) - the key header was missing or too long.
+
+A 5xx means nothing was queued: it is a `DominaiteTransportException`, retry with the same key.
+
+Captures and voids are issued from the Dominaite dashboard.
 
 ## The three identifiers
 
