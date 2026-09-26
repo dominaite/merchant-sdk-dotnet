@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.1 (unreleased)
+## 0.3.1
 
 - New `Webhooks.VerifyAndParse(payload, signatureHeader, secret, ...)` verifies a delivery and
   then parses it into a `WebhookEvent` (`Id`, `Type`, `ApiVersion`, `CreatedAt`, `Data`), with
