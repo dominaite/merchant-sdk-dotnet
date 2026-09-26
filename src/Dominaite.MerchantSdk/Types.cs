@@ -615,8 +615,9 @@ public sealed class Refund
     public string Status { get; set; } = string.Empty;
 
     /// <summary>
-    /// MINOR units. Before success, the amount requested (null for a full refund); on
-    /// <c>succeeded</c>, the amount actually refunded; always null on <c>failed</c>.
+    /// MINOR units. On <c>pending</c>, the amount requested (null for a full refund); on
+    /// <c>processing</c>, the amount being refunded (null until a full refund has been sized);
+    /// on <c>succeeded</c>, the amount actually refunded; always null on <c>failed</c>.
     /// </summary>
     public long? Amount { get; set; }
 

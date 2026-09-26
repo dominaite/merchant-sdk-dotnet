@@ -733,8 +733,9 @@ if (current.IsTerminal && !current.IsSucceeded)
 ```
 
 `Status` is `pending`, `processing`, `succeeded` or `failed` (constants on `RefundStatuses`); only
-`succeeded` and `failed` are final. `Amount` is the amount requested before success (null for a
-full refund), the amount actually refunded on `succeeded`, and always null on `failed`. A failed
+`succeeded` and `failed` are final. `Amount` is the amount requested on `pending` (null for
+a full refund), the amount being refunded on `processing` (null until a full refund has been
+sized), the amount actually refunded on `succeeded`, and always null on `failed`. A failed
 refund is a result, not an exception: `FailureCode` is `REFUND_AMOUNT_EXCEEDED`,
 `PAYMENT_NOT_REFUNDABLE` or `REFUND_FAILED` (`RefundFailureCodes`); treat any other value as
 `REFUND_FAILED`. `failed` is final for that key.
