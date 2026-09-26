@@ -28,6 +28,23 @@ public class WireContractTests
     }
 
     [Fact]
+    public void StorefrontCodes_MatchTheGateway_InOrder_AndNoneIsRetryable()
+    {
+        var storefront = Wire().GetProperty("errorCodes").GetProperty("storefront").EnumerateArray().ToList();
+
+        Assert.Equal(ErrorCodes.Storefront, storefront.Select(entry => entry.GetProperty("code").GetString()));
+        Assert.Equal(
+            new Dictionary<string, int>
+            {
+                [ErrorCodes.StorefrontMismatch] = 400,
+                [ErrorCodes.StorefrontInactive] = 409,
+                [ErrorCodes.StorefrontNotWhitelisted] = 409,
+            },
+            storefront.ToDictionary(entry => entry.GetProperty("code").GetString()!, entry => entry.GetProperty("httpStatus").GetInt32()));
+        Assert.All(storefront, entry => Assert.Equal(JsonValueKind.False, entry.GetProperty("retry").ValueKind));
+    }
+
+    [Fact]
     public void ValidationResponses_AreHttp400()
     {
         Assert.Equal(400, Wire().GetProperty("validationHttpStatus").GetInt32());

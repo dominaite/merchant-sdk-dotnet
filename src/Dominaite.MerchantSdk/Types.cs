@@ -305,8 +305,35 @@ public static class StoredPaymentMethodStatuses
     /// <summary>The card's expiry date has passed; a charge on it is refused.</summary>
     public const string Expired = "expired";
 
+    /// <summary>
+    /// The platform stopped the card on its own; <see cref="StoredPaymentMethod.RetiredReason"/>
+    /// says why. It never becomes active again, so ask the customer to save a card again. A charge
+    /// on it is refused with <c>PAYMENT_METHOD_NOT_ACTIVE</c>; revoking it still works.
+    /// </summary>
+    public const string Retired = "retired";
+
     /// <summary>The whole vocabulary, in the order the canonical contract lists it.</summary>
-    public static IReadOnlyList<string> All { get; } = [Active, Revoked, Expired];
+    public static IReadOnlyList<string> All { get; } = [Active, Revoked, Expired, Retired];
+}
+
+/// <summary>
+/// Why the platform retired a stored payment method, as constants plus the enumerable
+/// <see cref="StoredPaymentMethodRetiredReasons.All"/>. Treat a value not listed here as retired
+/// for an unknown reason.
+/// </summary>
+public static class StoredPaymentMethodRetiredReasons
+{
+    /// <summary>A charge on the card was declined as final.</summary>
+    public const string HardDecline = "hard_decline";
+
+    /// <summary>A charge on the card was disputed.</summary>
+    public const string Chargeback = "chargeback";
+
+    /// <summary>The payment that saved the card was fully refunded or disputed.</summary>
+    public const string SourceSaleReversed = "source_sale_reversed";
+
+    /// <summary>The whole vocabulary, in the order the canonical contract lists it.</summary>
+    public static IReadOnlyList<string> All { get; } = [HardDecline, Chargeback, SourceSaleReversed];
 }
 
 /// <summary>
@@ -338,6 +365,13 @@ public sealed class StoredPaymentMethod
 
     /// <summary>One of the <see cref="StoredPaymentMethodStatuses"/> values.</summary>
     public string Status { get; set; } = string.Empty;
+
+    /// <summary>
+    /// One of the <see cref="StoredPaymentMethodRetiredReasons"/> values when <see cref="Status"/> is
+    /// <c>retired</c>, and kept if the card is revoked afterwards; null (absent on the wire) on every
+    /// other card.
+    /// </summary>
+    public string? RetiredReason { get; set; }
 
     /// <summary>
     /// True only for <c>active</c>. A status this SDK has never heard of reads as not chargeable,

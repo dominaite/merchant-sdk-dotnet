@@ -26,6 +26,13 @@ built from the order with `IdempotencyKeys.ForOrder("checkout", orderId, amountM
   refused as not supported.
 - Also first released here: stored payment methods (`SaveCard`, `ChargePaymentMethodAsync`,
   `RevokePaymentMethodAsync`), merged earlier but never published.
+- Saved cards can be `retired`: the platform stopped the card on its own and it never becomes
+  active again. New `StoredPaymentMethodStatuses.Retired`, `StoredPaymentMethod.RetiredReason`
+  (null unless retired) and `StoredPaymentMethodRetiredReasons` (`hard_decline`, `chargeback`,
+  `source_sale_reversed`).
+- `ErrorCodes.Storefront` is now in the contract's order: `STOREFRONT_MISMATCH`,
+  `STOREFRONT_INACTIVE`, `STOREFRONT_NOT_WHITELISTED`.
+- Contract fixtures refreshed from the gateway (contract version 2026-09-16).
 
 ## 0.2.0
 

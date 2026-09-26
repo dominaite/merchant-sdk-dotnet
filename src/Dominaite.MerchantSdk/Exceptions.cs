@@ -205,12 +205,16 @@ public static class ErrorCodes
         PriorAttemptFailed,
     ];
 
-    /// <summary>The codes <see cref="DominaiteClient.CreateCheckoutSessionAsync"/> throws as a <see cref="DominaiteStorefrontException"/>.</summary>
+    /// <summary>
+    /// The codes <see cref="DominaiteClient.CreateCheckoutSessionAsync"/> throws as a
+    /// <see cref="DominaiteStorefrontException"/>, in the order the canonical contract lists them.
+    /// None is retryable, and none is in <see cref="SessionRefusals"/>.
+    /// </summary>
     public static IReadOnlyList<string> Storefront { get; } =
     [
-        StorefrontNotWhitelisted,
-        StorefrontInactive,
         StorefrontMismatch,
+        StorefrontInactive,
+        StorefrontNotWhitelisted,
     ];
 }
 
@@ -262,8 +266,8 @@ public sealed class DominaiteStorefrontException : DominaiteException
 public static class ChargeErrorCodes
 {
     /// <summary>
-    /// HTTP 409: the method is revoked or expired; ask the customer for another card via a hosted
-    /// session with SaveCard.
+    /// HTTP 409: the method is revoked, expired or retired; ask the customer for another card via
+    /// a hosted session with SaveCard.
     /// </summary>
     public const string PaymentMethodNotActive = "PAYMENT_METHOD_NOT_ACTIVE";
 
