@@ -231,7 +231,12 @@ public static class Webhooks
 
             if (evt.Data.ValueKind == JsonValueKind.Object)
             {
-                if (evt.Type.StartsWith("agreement.", StringComparison.Ordinal))
+                if (evt.Type.StartsWith("payment.", StringComparison.Ordinal))
+                {
+                    evt.Payment = evt.Data.Deserialize<PaymentEventData>(EventJsonOptions)!;
+                    evt.Payment.Raw = evt.Data;
+                }
+                else if (evt.Type.StartsWith("agreement.", StringComparison.Ordinal))
                 {
                     evt.Agreement = evt.Data.Deserialize<AgreementEventData>(EventJsonOptions)!;
                     evt.Agreement.Raw = evt.Data;
