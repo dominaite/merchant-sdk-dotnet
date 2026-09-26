@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.1 (unreleased)
+
+- New `Webhooks.VerifyAndParse(payload, signatureHeader, secret, ...)` verifies a delivery and
+  then parses it into a `WebhookEvent` (`Id`, `Type`, `ApiVersion`, `CreatedAt`, `Data`), with
+  `agreement.*` and `charge.*` data typed as `AgreementEventData` and `ChargeEventData`. A body
+  that verifies but is not a readable envelope throws with the new
+  `WebhookFailureReason.MalformedPayload`. Event type constants on `WebhookEventTypes`.
+- Webhook envelopes carry `apiVersion` (currently `2026-09-25`), and `agreement.*` and `charge.*`
+  data carry `sequence`. Both are optional: payloads from servers without them still parse, as
+  null. Order those events by `Sequence` per `OrderingKey`, never by `createdAt`; see Ordering in
+  the README. Signature verification is unchanged.
+
 ## 0.3.0
 
 Breaking. To migrate: set `IdempotencyKey` on every `CheckoutSessionRequest` and `ChargeRequest`,
