@@ -1,0 +1,21 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: dotnet test
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same SDKs as publish.yml: the library targets net8.0, the test project net10.0.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - run: dotnet test tests/Dominaite.MerchantSdk.Tests -c Release
