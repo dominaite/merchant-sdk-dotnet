@@ -124,8 +124,8 @@ public class CardFieldsTests
         Assert.Equal(CheckoutIntegrations.Fields, session.Integration);
         Assert.Equal("cs_4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c", session.ClientSecret);
         Assert.Equal("7a6b5c4d-3e2f-4a1b-9c8d-7e6f5a4b3c2d", session.TransactionId);
-        Assert.Equal("ck_live_blox_8c7d6e5f4a3b2c1d", session.CashierKey);
-        Assert.Equal("ctok_blox_0a1b2c3d4e5f6a7b", session.CashierToken);
+        Assert.Equal("ck_live_fields_8c7d6e5f4a3b2c1d", session.CashierKey);
+        Assert.Equal("ctok_fields_0a1b2c3d4e5f6a7b", session.CashierToken);
     }
 
     [Fact]
