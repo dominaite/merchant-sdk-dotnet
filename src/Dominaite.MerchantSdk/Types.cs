@@ -67,6 +67,18 @@ public sealed class CheckoutSessionRequest
     public bool? SaveCard { get; set; }
 
     /// <summary>
+    /// How the payer enters the card: <see cref="CheckoutIntegrations.Widget"/> (the default
+    /// when null) or <see cref="CheckoutIntegrations.Fields"/>, card fields in your own page.
+    /// </summary>
+    /// <remarks>
+    /// Card fields are enabled per merchant on request; asking for them on an account without
+    /// them is a 400 <c>INVALID_SELECTION</c>. The value is part of the idempotency identity:
+    /// replaying a key with a different integration is <c>IDEMPOTENCY_KEY_REUSED</c>. Null is
+    /// omitted from the body.
+    /// </remarks>
+    public string? Integration { get; set; }
+
+    /// <summary>
     /// The idempotency key. Required. It travels in the header and in the signature, never in the
     /// body.
     /// </summary>
@@ -116,18 +128,57 @@ public sealed class CheckoutSession
     /// <summary>When the session stops being usable. Sessions last about 2 hours.</summary>
     public DateTimeOffset? ExpiresAt { get; set; }
 
+    /// <summary>
+    /// What the session was created for: <see cref="CheckoutIntegrations.Widget"/> or
+    /// <see cref="CheckoutIntegrations.Fields"/>. For fields, <see cref="CashierKey"/> and
+    /// <see cref="CashierToken"/> are the card fields key and session token.
+    /// </summary>
+    public string Integration { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Set only for <see cref="CheckoutIntegrations.Fields"/>: the browser credential the
+    /// checkout.js drop-in sends for this session. Opaque, at most 128 characters, the same on
+    /// every replay. Hand it to the payer's page with the other session values; never log it or
+    /// keep it past the session.
+    /// </summary>
+    public string? ClientSecret { get; set; }
+
     /// <summary>The unparsed payload, for fields this class does not model yet.</summary>
     [JsonIgnore]
     public JsonElement Raw { get; set; }
 
     /// <summary>
-    /// A description with the session token redacted, so a logged session object cannot leak a
-    /// bearer credential.
+    /// A description with the session token and client secret redacted, so a logged session
+    /// object cannot leak a bearer credential.
     /// </summary>
     /// <returns>The redacted description.</returns>
     public override string ToString()
         => $"CheckoutSession {{ TransactionId = {this.TransactionId}, OrderId = {this.OrderId}, "
-            + $"Amount = {this.Amount}, Currency = {this.Currency}, CashierToken = [REDACTED] }}";
+            + $"Amount = {this.Amount}, Currency = {this.Currency}, Integration = {this.Integration}, "
+            + "CashierToken = [REDACTED], ClientSecret = [REDACTED] }";
+}
+
+/// <summary>
+/// The checkout integration wire values, as constants plus the enumerable
+/// <see cref="CheckoutIntegrations.All"/>.
+/// </summary>
+public static class CheckoutIntegrations
+{
+    /// <summary>The hosted cashier widget. The default.</summary>
+    public const string Widget = "widget";
+
+    /// <summary>
+    /// Card fields rendered in your own page by the checkout.js drop-in. Enabled per merchant on
+    /// request.
+    /// </summary>
+    public const string Fields = "fields";
+
+    /// <summary>The whole vocabulary, in the order the canonical contract lists it.</summary>
+    public static IReadOnlyList<string> All { get; } =
+    [
+        Widget,
+        Fields,
+    ];
 }
 
 /// <summary>
