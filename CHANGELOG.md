@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.2 (unreleased)
+## 0.4.0 (unreleased)
 
 - Card fields: `CheckoutSessionRequest.Integration` (`CheckoutIntegrations.Widget` or
   `CheckoutIntegrations.Fields`, omitted when null), and `CheckoutSession.Integration` and
