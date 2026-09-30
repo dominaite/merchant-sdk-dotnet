@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 (unreleased)
+
+- Card fields: `CheckoutSessionRequest.Integration` (`CheckoutIntegrations.Widget` or
+  `CheckoutIntegrations.Fields`, omitted when null), and `CheckoutSession.Integration` and
+  `CheckoutSession.ClientSecret` on the response. `ClientSecret` is set only for fields sessions
+  and is redacted from `ToString()`. Card fields are enabled per merchant on request; see the
+  README.
+- Contract fixture: `integrationVocabulary`, the two new checkout fields and a fields session
+  example.
+
 ## 0.3.1
 
 - New `Webhooks.VerifyAndParse(payload, signatureHeader, secret, ...)` verifies a delivery and

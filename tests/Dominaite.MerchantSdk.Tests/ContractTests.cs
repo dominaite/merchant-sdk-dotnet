@@ -31,7 +31,7 @@ public class ContractTests
     private const string Secret = "dms_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// <summary>The sha256 of the canonical fixture, shared across every SDK that vendors it.</summary>
-    private const string FixtureSha256 = "3190a9297db562aa2c13fba6b2b3996a4a310478179bc4db4e1dc465938d6a92";
+    private const string FixtureSha256 = "28963ede59b2409f1ba4f3d8cef086016ae3a82c37737250429bdacec3efede6";
 
     private static readonly JsonSerializerOptions ReadOptions = new()
     {
@@ -327,7 +327,7 @@ public class ContractTests
         var create = Endpoint("createCheckoutSession");
         var expected = Strings(create.GetProperty("fields")).Order().ToList();
 
-        foreach (var name in new[] { "successExample", "refusalExample" })
+        foreach (var name in new[] { "successExample", "fieldsSuccessExample", "refusalExample" })
         {
             var keys = create.GetProperty(name)
                 .EnumerateObject()
