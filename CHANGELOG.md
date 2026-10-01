@@ -2,6 +2,11 @@
 
 ## 0.4.0 (unreleased)
 
+- Processor reference: `CheckoutStatus.PspReference` and `PaymentEventData.PspReference`. The
+  payment processor's reference for the transaction, null until known and on a sale settled by
+  reconciliation without a processor webhook. Refund and cancel events carry the original sale's
+  reference. Not on `charge.*` events.
+- Contract fixture: `pspReference` in the status read fields and examples.
 - Card fields: `CheckoutSessionRequest.Integration` (`CheckoutIntegrations.Widget` or
   `CheckoutIntegrations.Fields`, omitted when null), and `CheckoutSession.Integration` and
   `CheckoutSession.ClientSecret` on the response. `ClientSecret` is set only for fields sessions

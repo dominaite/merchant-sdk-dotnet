@@ -254,6 +254,13 @@ public sealed class CheckoutStatus
     public string? OrderReference { get; set; }
 
     /// <summary>
+    /// The payment processor's reference for the transaction. Null until known, and on a sale
+    /// settled by reconciliation without a processor webhook. Refund and cancel events carry the
+    /// original sale's reference. Absent on gateways that predate the field.
+    /// </summary>
+    public string? PspReference { get; set; }
+
+    /// <summary>
     /// One of the <see cref="TransactionStatuses"/> values. Ask <see cref="IsPaid"/> rather than
     /// comparing by hand.
     /// </summary>
