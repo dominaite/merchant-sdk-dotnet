@@ -170,6 +170,13 @@ public sealed class PaymentEventData
     /// <summary>The hosted checkout order id, the same value as on the status read.</summary>
     public string? OrderId { get; set; }
 
+    /// <summary>
+    /// The payment processor's reference for the transaction. Null until known, and on a sale
+    /// settled by reconciliation without a processor webhook. Refund and cancel events carry the
+    /// original sale's reference. Absent on gateways that predate the field.
+    /// </summary>
+    public string? PspReference { get; set; }
+
     /// <summary>The description you sent on the create call, when you sent one.</summary>
     public string? Description { get; set; }
 

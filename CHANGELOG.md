@@ -2,6 +2,8 @@
 
 ## 0.4.0 (unreleased)
 
+- `PspReference` on `CheckoutStatus` and on `PaymentEventData`: the payment processor's reference
+  for the transaction, null until known. Older gateways omit it. Not on `charge.*` events.
 - Card fields: `CheckoutSessionRequest.Integration` (`CheckoutIntegrations.Widget` or
   `CheckoutIntegrations.Fields`, omitted when null), and `CheckoutSession.Integration` and
   `CheckoutSession.ClientSecret` on the response. `ClientSecret` is set only for fields sessions
