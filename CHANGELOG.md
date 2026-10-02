@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 (unreleased)
+## 0.4.0
 
 - Processor reference: `CheckoutStatus.PspReference` and `PaymentEventData.PspReference`. The
   payment processor's reference for the transaction, null until known and on a sale settled by
