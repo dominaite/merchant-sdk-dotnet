@@ -362,8 +362,8 @@ the last four digits, the expiry and a status (`active`, `revoked`, `expired` or
 `retired` means the platform stopped the card on its own; `RetiredReason` says why
 (`hard_decline`, `chargeback` or `source_sale_reversed`). Persist the id against your customer. The full card number never reaches the SDK, and the provider token behind
 the id never leaves the gateway. `Brand`, `Last4` and the expiry are nullable: the gateway omits
-them when the provider did not report them. This is not the gateway's `paymentMethod` field (the
-string category of how the payer paid), which stays on `Raw`.
+them when the provider did not report them. This is not `PaymentMethod` (the string category of
+how the payer paid), see Status polling.
 
 ```csharp
 var status = await client.GetStatusAsync(session.TransactionId);
@@ -679,6 +679,12 @@ treat it as an abandoned order.
 
 `disputed` is not terminal either: a chargeback is open and resolves later, so keep watching it.
 `IsPaid` is false for it too, although the money did move.
+
+`PaymentMethod` says how the payer paid (`PaymentMethodCategories`: `card`, `wallet`,
+`bank_transfer`, `sepa`) and `WalletType` which wallet (`WalletTypes`: `apple_pay`, `google_pay`,
+`samsung_pay`). Both are null while the payment is open and on older transactions. They are
+reporting data, not a money-flow switch: a wallet payment refunds, captures and disputes like a
+card. An unknown `WalletType` is a valid wallet the gateway added later, not an error.
 
 Call this from your server, never from the browser, and poll after the payer returns to you or on
 your order timeout - not in a tight loop, the endpoint is rate limited per key.

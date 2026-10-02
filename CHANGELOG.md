@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Wallet reporting: `CheckoutStatus.PaymentMethod` (`card`, `wallet`, `bank_transfer` or `sepa`)
+  and `CheckoutStatus.WalletType` (`apple_pay`, `google_pay`, `samsung_pay`, or a lower-cased
+  identifier for a wallet not listed yet). Both are nullable: null while the payment is open and
+  on older transactions, and `WalletType` is null for non-wallet payments. Reporting data only, a
+  wallet payment refunds, captures and disputes like a card.
+- `PaymentMethodCategories` and `WalletTypes` constants, each enumerable as `All`.
+- Contract fixtures: `paymentMethod` and `walletType` in the status read fields and examples, and
+  the `wallets` section in the wire contract.
+
 ## 0.4.0
 
 - Processor reference: `CheckoutStatus.PspReference` and `PaymentEventData.PspReference`. The

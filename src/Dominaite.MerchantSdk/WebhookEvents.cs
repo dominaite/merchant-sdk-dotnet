@@ -143,12 +143,15 @@ public sealed class PaymentEventData
     public string Currency { get; set; } = string.Empty;
 
     /// <summary>
-    /// How the payer paid, as a category (<c>card</c>, <c>wallet</c>, ...). Not the saved card:
-    /// that is <see cref="StoredPaymentMethod"/>.
+    /// How the payer paid, one of the <see cref="PaymentMethodCategories"/> values. Not the saved
+    /// card: that is <see cref="StoredPaymentMethod"/>.
     /// </summary>
     public string? PaymentMethod { get; set; }
 
-    /// <summary>The wallet, e.g. <c>apple_pay</c>, on wallet payments only.</summary>
+    /// <summary>
+    /// The wallet on wallet payments only, e.g. <see cref="WalletTypes.ApplePay"/>. An unknown
+    /// value is a valid wallet, not an error.
+    /// </summary>
     public string? WalletType { get; set; }
 
     /// <summary>
