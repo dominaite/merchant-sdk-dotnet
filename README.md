@@ -543,6 +543,10 @@ Flat JSON, no `success` wrapper - do not branch on a `success` field, there isn'
   "createdAt": "<ISO 8601 UTC instant of the transition>",
   "data": {
     "transactionId": "...",
+    "orderReference": "order-123",
+    "orderId": "dom_9a8b7c6d5e4f",
+    "pspReference": "...",
+    "description": "Pro plan",
     "status": "succeeded",
     "previousStatus": "pending",
     "kind": "sale",
@@ -550,6 +554,10 @@ Flat JSON, no `success` wrapper - do not branch on a `success` field, there isn'
     "grossAmount": 8701,
     "surchargeAmount": 261,
     "currency": "EUR",
+    "paymentMethod": "card",
+    "walletType": null,
+    "paymentMethodBrand": "visa",
+    "paymentMethodLast4": "4242",
     "originalTransactionId": null,
     "idempotencyKey": "order-123"
   }
@@ -559,6 +567,17 @@ Flat JSON, no `success` wrapper - do not branch on a `success` field, there isn'
 Amounts are minor units. On `payment.*` events `amount` is what you are PAID (base), while
 `grossAmount` is the card movement; on `payment.refunded` the `amount` is what went back to the
 customer. `surchargeAmount`, `previousStatus`, `kind` and `originalTransactionId` are nullable.
+
+`payment.*` data is typed as `PaymentEventData` on `WebhookEvent.Payment`, so each identification
+field is a property there. `OrderReference` is your own order reference and the field to match
+events to your orders on; refund and cancel events carry the original payment's. `OrderId` is the
+hosted checkout order id from the status read, null on refunds, cancellations and payments taken
+outside hosted checkout. `PspReference` is the processor's reference, null until the processor has
+reported it, so read the status later if a `payment.succeeded` arrives without it. `Description` is
+what you sent on create session, null on refund and cancel events. `PaymentMethodBrand` and
+`PaymentMethodLast4` are set once a card payment was attempted. `IdempotencyKey` is null on refund
+and dispute events. Every identification field except `TransactionId` is nullable and may arrive
+as null or be absent; both read as null. Fields this class does not model yet stay on `Raw`.
 
 `apiVersion` is the dated version of the envelope and `data` shapes. New fields are added without
 changing it; a new value means a breaking change. Deliveries from servers that predate the field
