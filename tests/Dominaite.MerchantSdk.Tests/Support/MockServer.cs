@@ -66,14 +66,20 @@ public sealed class MockServer : IDisposable
     private readonly object _lock = new();
 
     public MockServer(params Reply[] replies)
+        : this(FreePort, replies)
+    {
+    }
+
+    /// <summary>
+    /// <paramref name="pickPort"/> is asked again whenever its port turns out to be taken: a port
+    /// that was free when probed can be claimed by a parallel test before this listener binds it.
+    /// </summary>
+    internal MockServer(Func<int> pickPort, params Reply[] replies)
     {
         this._replies = new Queue<Reply>(replies);
 
-        var port = FreePort();
+        (this._listener, var port) = Listen(pickPort);
         this.BaseUrl = $"http://localhost:{port}/api";
-        this._listener = new HttpListener();
-        this._listener.Prefixes.Add($"http://localhost:{port}/");
-        this._listener.Start();
         this._loop = Task.Run(this.ServeAsync);
     }
 
@@ -103,6 +109,26 @@ public sealed class MockServer : IDisposable
         catch (AggregateException)
         {
             // The listener was torn down mid-accept; nothing to report.
+        }
+    }
+
+    private static (HttpListener Listener, int Port) Listen(Func<int> pickPort)
+    {
+        const int attempts = 10;
+        for (var attempt = 1; ; attempt++)
+        {
+            var port = pickPort();
+            var listener = new HttpListener();
+            listener.Prefixes.Add($"http://localhost:{port}/");
+            try
+            {
+                listener.Start();
+                return (listener, port);
+            }
+            catch (HttpListenerException) when (attempt < attempts)
+            {
+                listener.Close();
+            }
         }
     }
 
