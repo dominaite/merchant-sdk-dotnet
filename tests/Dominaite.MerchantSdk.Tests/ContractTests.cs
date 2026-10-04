@@ -31,7 +31,7 @@ public class ContractTests
     private const string Secret = "dms_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// <summary>The sha256 of the canonical fixture, shared across every SDK that vendors it.</summary>
-    private const string FixtureSha256 = "4f907f294ee79af17e413d07a1ee426a60e042c427695828c7125044dbf9b00f";
+    private const string FixtureSha256 = "5128e63ae00932f8eef512469c92c3ef4e5ab6095ed08cfa0afbb9334766cc71";
 
     private static readonly JsonSerializerOptions ReadOptions = new()
     {
@@ -285,6 +285,8 @@ public class ContractTests
         // Null in the example, and null is not zero: nothing was refunded, and the SDK must not
         // invent a 0 that reads as "a refund of nothing happened".
         Assert.Null(parsed.RefundedAmount);
+        Assert.Equal(PaymentMethodCategories.Wallet, parsed.PaymentMethod);
+        Assert.Equal(WalletTypes.ApplePay, parsed.WalletType);
         Assert.Equal(DateTimeOffset.Parse("2026-08-21T09:15:30.000Z"), parsed.CreatedAt);
         Assert.Equal(DateTimeOffset.Parse("2026-08-21T09:16:05.000Z"), parsed.UpdatedAt);
 
@@ -310,6 +312,8 @@ public class ContractTests
 
         Assert.Null(parsed.OrderReference);
         Assert.Null(parsed.RefundedAmount);
+        Assert.Null(parsed.PaymentMethod);
+        Assert.Null(parsed.WalletType);
         Assert.Null(parsed.UpdatedAt);
         Assert.Null(parsed.ExpiresAt);
         Assert.False(parsed.IsTerminal);

@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using Xunit;
 
@@ -42,6 +43,32 @@ public class WireContractTests
             },
             storefront.ToDictionary(entry => entry.GetProperty("code").GetString()!, entry => entry.GetProperty("httpStatus").GetInt32()));
         Assert.All(storefront, entry => Assert.Equal(JsonValueKind.False, entry.GetProperty("retry").ValueKind));
+    }
+
+    [Fact]
+    public void WalletTypes_MatchTheGateway_InOrder()
+    {
+        Assert.Equal(Strings(Wire().GetProperty("wallets").GetProperty("walletTypes")), WalletTypes.All);
+    }
+
+    [Fact]
+    public void WalletReportingFields_AreOptionalStringsOnTheStatusType()
+    {
+        var fields = Wire().GetProperty("wallets").GetProperty("reportingFields").EnumerateArray().ToList();
+        var statusFields = typeof(CheckoutStatus)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .ToDictionary(property => JsonNamingPolicy.CamelCase.ConvertName(property.Name));
+
+        Assert.NotEmpty(fields);
+        Assert.All(fields, field =>
+        {
+            var path = field.GetProperty("path").GetString()!;
+            Assert.True(statusFields.TryGetValue(path, out var property), $"CheckoutStatus has no {path}");
+            Assert.Equal(typeof(string), property!.PropertyType);
+            Assert.Equal(NullabilityState.Nullable, new NullabilityInfoContext().Create(property).ReadState);
+            Assert.Equal("string", field.GetProperty("type").GetString());
+            Assert.False(field.GetProperty("required").GetBoolean());
+        });
     }
 
     [Fact]
