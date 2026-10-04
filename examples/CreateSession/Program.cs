@@ -4,7 +4,7 @@ using Dominaite.MerchantSdk;
 //
 //   export DOMINAITE_KEY_ID=dmk_...
 //   export DOMINAITE_SECRET=dms_...
-//   export DOMINAITE_BASE_URL=https://func-dom-gw-payments-dev-gwc-01.azurewebsites.net/api
+//   export DOMINAITE_BASE_URL=https://...   # a test environment only
 //   dotnet run --project examples/CreateSession
 //
 // Leave DOMINAITE_BASE_URL unset for production. A dev key against production is a guaranteed
