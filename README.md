@@ -47,13 +47,13 @@ client object cannot leak it. The same goes for `CheckoutSession.ToString()` and
 | Environment | Base URL |
 |---|---|
 | Production | `https://api.dominaite.com/payments` (the default) |
-| Dev / staging | the raw payments function host, whose Azure Functions route prefix is `/api`, e.g. `https://func-dom-gw-payments-dev-gwc-01.azurewebsites.net/api` |
+| Dev / staging | the base URL of that environment |
 
 Confirm the host for your environment before the first call. **A dev key against production is a
 guaranteed `INVALID_API_KEY`** - keys are issued per environment.
 
-The base URL's own prefix is never part of the signed path: on dev you POST to
-`.../api/merchant-api/checkout/sessions` but you sign
+The base URL's own prefix is never part of the signed path: on production you POST to
+`https://api.dominaite.com/payments/merchant-api/checkout/sessions` but you sign
 `/merchant-api/checkout/sessions`.
 
 ## Quickstart
@@ -61,8 +61,9 @@ The base URL's own prefix is never part of the signed path: on dev you POST to
 ```sh
 export DOMINAITE_KEY_ID=dmk_...      # Website integration tab
 export DOMINAITE_SECRET=dms_...      # shown once when you generated the key
-export DOMINAITE_BASE_URL=https://func-dom-gw-payments-dev-gwc-01.azurewebsites.net/api
 # Production needs no DOMINAITE_BASE_URL.
+# For a test environment, set it to that environment's base URL:
+# export DOMINAITE_BASE_URL=https://...
 ```
 
 ```csharp
