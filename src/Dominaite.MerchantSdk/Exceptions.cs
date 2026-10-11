@@ -237,6 +237,10 @@ public sealed class DominaiteRateLimitException : DominaiteException
 /// means an unknown transaction id, and from the payment method routes an id that is not yours
 /// (<c>PAYMENT_METHOD_NOT_FOUND</c> on a charge, <c>VALIDATION_ERROR</c> on a revoke).
 /// </summary>
+/// <remarks>
+/// <see cref="RawResult"/> keeps the answer's envelope. Read the details there that
+/// <see cref="DominaiteException.Code"/> does not carry, for example the field errors of a 400.
+/// </remarks>
 public sealed class DominaiteApiException : DominaiteException
 {
     /// <summary>Initializes a new instance of the <see cref="DominaiteApiException"/> class.</summary>
@@ -244,11 +248,29 @@ public sealed class DominaiteApiException : DominaiteException
     /// <param name="code">The machine-readable reason when the API sent one, otherwise null.</param>
     /// <param name="message">The human-readable reason.</param>
     public DominaiteApiException(int httpStatus, string? code, string message)
+        : this(httpStatus, code, message, default)
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="DominaiteApiException"/> class.</summary>
+    /// <param name="httpStatus">The HTTP status code.</param>
+    /// <param name="code">The machine-readable reason when the API sent one, otherwise null.</param>
+    /// <param name="message">The human-readable reason.</param>
+    /// <param name="rawResult">The whole envelope, as received.</param>
+    public DominaiteApiException(int httpStatus, string? code, string message, JsonElement rawResult)
         : base(message)
     {
         this.HttpStatus = httpStatus;
         this.Code = code;
+        this.RawResult = rawResult;
     }
+
+    /// <summary>
+    /// The whole envelope exactly as received, for fields the typed surface does not model. Its
+    /// <see cref="JsonElement.ValueKind"/> is <see cref="JsonValueKind.Undefined"/> when the answer
+    /// had no envelope.
+    /// </summary>
+    public JsonElement RawResult { get; }
 }
 
 /// <summary>

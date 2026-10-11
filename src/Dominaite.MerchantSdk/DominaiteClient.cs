@@ -1041,7 +1041,7 @@ public sealed class DominaiteClient : IDisposable
                         message ?? "Too many requests (HTTP 429). Wait, then retry with the same idempotency key.",
                         this.RetryAfter);
                 default:
-                    return new DominaiteApiException(this.Status, code, message ?? "Request rejected");
+                    return new DominaiteApiException(this.Status, code, message ?? "Request rejected", this.Envelope);
             }
         }
 

@@ -283,6 +283,27 @@ public class ClientTests
     }
 
     /// <summary>
+    /// A 400 names the bad fields in the envelope. The exception keeps the envelope, so the caller
+    /// can read them without the SDK modelling every detail.
+    /// </summary>
+    [Fact]
+    public async Task AnApiErrorKeepsTheEnvelopeForTheDetails()
+    {
+        using var server = new MockServer(Reply.Raw(
+            400,
+            """{"success":false,"error":{"code":"VALIDATION_ERROR","message":"Validation failed","statusCode":400,"validationErrors":[{"field":"orderReference","code":"FIELD_MAX_LENGTH","message":"Too long"}]}}"""));
+        using var client = ClientFor(server);
+
+        var error = await Assert.ThrowsAsync<DominaiteApiException>(
+            () => client.CreateCheckoutSessionAsync(Request()));
+
+        Assert.Equal("VALIDATION_ERROR", error.Code);
+        Assert.Equal(400, error.HttpStatus);
+        var fieldError = error.RawResult.GetProperty("error").GetProperty("validationErrors")[0];
+        Assert.Equal("orderReference", fieldError.GetProperty("field").GetString());
+    }
+
+    /// <summary>
     /// A 5xx with an HTML body from a proxy is still a retryable transport failure. Parsing has to
     /// happen after the status branch, or this surfaces as a bogus parse error.
     /// </summary>
