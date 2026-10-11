@@ -156,7 +156,8 @@ public sealed class AgreementConsent
     /// </summary>
     /// <remarks>
     /// On a checkout session, use a version the platform publishes:
-    /// <c>recurring.consentTextVersions</c> in the integration contract, for example
+    /// <see cref="IntegrationContractRecurring.ConsentTextVersions"/> from
+    /// <see cref="DominaiteClient.GetIntegrationContractAsync"/>, for example
     /// <c>recurring-2026-09</c>. A subscription session refuses any other version. On
     /// <see cref="DominaiteClient.CreateAgreementAsync"/> it can also be your own label for the
     /// wording on your page. The subscription session for that agreement then needs consent with a

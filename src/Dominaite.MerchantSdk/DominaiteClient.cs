@@ -37,6 +37,9 @@ public sealed class DominaiteClient : IDisposable
     /// <summary>The credentials-and-clock smoke test. Creates nothing.</summary>
     public const string PingPath = "/merchant-api/ping";
 
+    /// <summary>The public integration contract. The API answers it without a signature.</summary>
+    public const string IntegrationContractPath = "/merchant-api/integration/contract";
+
     /// <summary>
     /// The stored payment methods path. POST <c>PaymentMethodsPath/{id}/charges</c> charges a
     /// stored card; DELETE <c>PaymentMethodsPath/{id}</c> revokes it.
@@ -186,6 +189,31 @@ public sealed class DominaiteClient : IDisposable
         var ping = Deserialize<PingResponse>(payload, "ping");
         ping.Raw = payload;
         return ping;
+    }
+
+    /// <summary>
+    /// Reads the public integration contract of the API this client calls: its version, the status
+    /// and event vocabularies, the consent wording versions, and everything else in
+    /// <see cref="IntegrationContract.Raw"/>.
+    /// </summary>
+    /// <remarks>
+    /// The route needs no credentials, so any key works. The SDK signs the call like every other
+    /// one, and the API does not check the signature on this route.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The contract.</returns>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">An unexpected response.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<IntegrationContract> GetIntegrationContractAsync(CancellationToken cancellationToken = default)
+    {
+        // GET signs an EMPTY idempotency key and an EMPTY body.
+        var reply = await this.SendAsync(HttpMethod.Get, IntegrationContractPath, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        var data = reply.ReadObject("integration contract");
+        var contract = Deserialize<IntegrationContract>(data, "integration contract");
+        contract.Raw = data;
+        return contract;
     }
 
     /// <summary>
