@@ -512,10 +512,11 @@ public sealed class DominaiteRevokeException : DominaiteException
 }
 
 /// <summary>
-/// The codes <see cref="DominaiteClient.CreateRefundAsync"/> and
-/// <see cref="DominaiteClient.GetRefundAsync"/> throw as a <see cref="DominaiteRefundException"/>,
-/// in the order the canonical contract lists them. A 5xx is none of these: nothing was queued, and
-/// it arrives as a retryable <see cref="DominaiteTransportException"/>.
+/// The codes <see cref="DominaiteClient.CreateRefundAsync"/>,
+/// <see cref="DominaiteClient.GetRefundAsync"/> and <see cref="DominaiteClient.ListRefundsAsync"/>
+/// throw as a <see cref="DominaiteRefundException"/>, in the order the canonical contract lists
+/// them. A 5xx is none of these: nothing was queued, and it arrives as a retryable
+/// <see cref="DominaiteTransportException"/>.
 /// </summary>
 public static class RefundErrorCodes
 {

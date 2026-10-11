@@ -1022,6 +1022,42 @@ public sealed class Refund
 }
 
 /// <summary>
+/// What <see cref="DominaiteClient.ListRefundsAsync"/> returns: the refunds of one payment and
+/// what is left to refund.
+/// </summary>
+public sealed class RefundList
+{
+    /// <summary>The payment whose refunds these are.</summary>
+    public string TransactionId { get; set; } = string.Empty;
+
+    /// <summary>ISO 4217 code of the payment and of every amount here.</summary>
+    public string Currency { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The amount refunded so far in MINOR units, from every source: this API, the dashboard and
+    /// the payment provider.
+    /// </summary>
+    public long RefundedAmount { get; set; }
+
+    /// <summary>
+    /// The amount a new refund can take now, in MINOR units: what is not refunded yet, minus
+    /// refunds still in progress. 0 when the payment cannot be refunded.
+    /// </summary>
+    public long RefundableAmount { get; set; }
+
+    /// <summary>
+    /// The refunds made through this API, newest first, each as
+    /// <see cref="DominaiteClient.GetRefundAsync"/> reads it. Empty when there are none. A refund
+    /// made in the dashboard is in <see cref="RefundedAmount"/> but not in this list.
+    /// </summary>
+    public IReadOnlyList<Refund> Refunds { get; set; } = [];
+
+    /// <summary>The unwrapped list as the gateway sent it, for fields this class does not model yet.</summary>
+    [JsonIgnore]
+    public JsonElement Raw { get; set; }
+}
+
+/// <summary>
 /// What <see cref="DominaiteClient.PingAsync"/> returns: proof that your key, secret, signing and
 /// clock are all good, without creating anything.
 /// </summary>

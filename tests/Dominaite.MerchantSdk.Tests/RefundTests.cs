@@ -323,4 +323,71 @@ public class RefundTests
         Assert.Equal("""{"amount":2500,"futureField":true}""", sent.Body);
         AssertSignatureMatches(sent, CreatePath, RefundKey);
     }
+
+    [Fact]
+    public async Task TheListSignsAGetWithNoKeyAndNoBodyAndReadsTheTotals()
+    {
+        using var server = new MockServer(Reply.Raw(
+            200,
+            """{"success":true,"data":{"transactionId":"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d","currency":"EUR","refundedAmount":3500,"refundableAmount":4940,"refunds":[{"refundId":"re_7c1e9a2b4d6f48a0b3c5d7e9f1a2b3c4","transactionId":"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d","status":"pending","amount":2500,"currency":"EUR"},{"refundId":"re_00000000000040008000000000000001","transactionId":"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d","status":"succeeded","amount":1000,"currency":"EUR","completedAt":"2026-09-26T10:05:40Z"}]}}"""));
+        using var client = ClientFor(server);
+
+        var list = await client.ListRefundsAsync(" 1A2B3C4D-5E6F-4A7B-8C9D-0E1F2A3B4C5D ");
+
+        var sent = server.LastRequest;
+        Assert.Equal("GET", sent.Method);
+        Assert.Equal("/api" + CreatePath, sent.Path);
+        Assert.Equal(string.Empty, sent.Body);
+        Assert.Null(sent.Header("Idempotency-Key"));
+        AssertSignatureMatches(sent, CreatePath, string.Empty);
+
+        Assert.Equal(TransactionId, list.TransactionId);
+        Assert.Equal("EUR", list.Currency);
+        Assert.Equal(3500, list.RefundedAmount);
+        Assert.Equal(4940, list.RefundableAmount);
+        Assert.Equal(2, list.Refunds.Count);
+        Assert.Equal(RefundId, list.Refunds[0].RefundId);
+        Assert.False(list.Refunds[0].IsTerminal);
+        Assert.True(list.Refunds[1].IsSucceeded);
+        Assert.Equal("re_00000000000040008000000000000001", list.Refunds[1].Raw.GetProperty("refundId").GetString());
+        Assert.Equal(4940, list.Raw.GetProperty("refundableAmount").GetInt64());
+    }
+
+    [Fact]
+    public async Task APaymentWithoutRefundsGivesAnEmptyList()
+    {
+        using var server = new MockServer(Reply.Raw(
+            200,
+            """{"success":true,"data":{"transactionId":"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d","currency":"EUR","refundedAmount":0,"refundableAmount":8440,"refunds":[]}}"""));
+        using var client = ClientFor(server);
+
+        var list = await client.ListRefundsAsync(TransactionId);
+
+        Assert.Empty(list.Refunds);
+        Assert.Equal(8440, list.RefundableAmount);
+    }
+
+    [Fact]
+    public async Task AnUnknownPaymentIsARefundErrorWithItsCode()
+    {
+        using var server = new MockServer(Reply.ErrorEnvelope(404, "PAYMENT_NOT_FOUND", "Payment not found."));
+        using var client = ClientFor(server);
+
+        var error = await Assert.ThrowsAsync<DominaiteRefundException>(() => client.ListRefundsAsync(TransactionId));
+
+        Assert.Equal("PAYMENT_NOT_FOUND", error.Code);
+        Assert.Equal(404, error.HttpStatus);
+        Assert.False(error.IsRetryable);
+    }
+
+    [Fact]
+    public async Task TheListRefusesAnIdThatIsNotAPaymentIdBeforeSending()
+    {
+        using var server = new MockServer();
+        using var client = ClientFor(server);
+
+        await Assert.ThrowsAsync<DominaiteValidationException>(() => client.ListRefundsAsync("../plans"));
+
+        Assert.Empty(server.Requests);
+    }
 }

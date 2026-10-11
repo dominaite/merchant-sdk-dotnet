@@ -45,6 +45,7 @@ public sealed class DominaiteClient : IDisposable
 
     /// <summary>
     /// The payments path. POST <c>PaymentsPath/{transactionId}/refunds</c> refunds a payment; GET
+    /// <c>PaymentsPath/{transactionId}/refunds</c> lists its refunds, and GET
     /// <c>PaymentsPath/{transactionId}/refunds/{refundId}</c> reads one refund.
     /// </summary>
     public const string PaymentsPath = "/merchant-api/payments";
@@ -585,6 +586,39 @@ public sealed class DominaiteClient : IDisposable
         return reply.ReadRefund();
     }
 
+    /// <summary>
+    /// Lists the refunds of one payment, newest first, with the amount refunded so far and the
+    /// amount you can still refund.
+    /// </summary>
+    /// <remarks>
+    /// Read <see cref="RefundList.RefundableAmount"/> before a partial refund. A payment without
+    /// refunds gives an empty list.
+    /// </remarks>
+    /// <param name="transactionId">The payment: the id a checkout session or a charge returned.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The refunds and the two totals.</returns>
+    /// <exception cref="DominaiteValidationException">Bad arguments; nothing was sent.</exception>
+    /// <exception cref="DominaiteRefundException">The gateway answered with an error code, e.g. <c>PAYMENT_NOT_FOUND</c> for an unknown or foreign payment; inspect Code.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the scope this route needs.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">An unexpected response.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<RefundList> ListRefundsAsync(
+        string transactionId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(transactionId);
+
+        var path = $"{PaymentsPath}/{NormalizeTransactionId(transactionId)}/refunds";
+
+        // GET signs an EMPTY idempotency key and an EMPTY body, and sends no Idempotency-Key
+        // header.
+        var reply = await this.SendAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        return reply.ReadRefundList();
+    }
+
     /// <summary>Releases the HttpClient this instance created for itself.</summary>
     public void Dispose()
     {
@@ -913,6 +947,45 @@ public sealed class DominaiteClient : IDisposable
             var refund = Deserialize<Refund>(data, "refund");
             refund.Raw = data;
             return refund;
+        }
+
+        /// <summary>
+        /// The refund list in <c>data</c> on a success, each refund with its own Raw, or the error
+        /// the answer stands for, mapped like <see cref="ReadRefund"/>.
+        /// </summary>
+        public RefundList ReadRefundList()
+        {
+            if (this.Status >= 400)
+            {
+                var code = this.ErrorCode;
+                if (this.Status < 500 && code is not null)
+                {
+                    throw new DominaiteRefundException(
+                        this.Status,
+                        code,
+                        this.ErrorMessage ?? "The refund list was refused.",
+                        this.Envelope);
+                }
+
+                throw this.Rejection();
+            }
+
+            if (this.Data is not { } data
+                || !data.TryGetProperty("refunds", out var refunds)
+                || refunds.ValueKind != JsonValueKind.Array)
+            {
+                throw new DominaiteApiException(this.Status, null, "The Dominaite API answered the refund list without a refund list body.");
+            }
+
+            var list = Deserialize<RefundList>(data, "refund list");
+            list.Raw = data;
+            list.Refunds = [.. refunds.EnumerateArray().Select(item =>
+            {
+                var refund = Deserialize<Refund>(item, "refund");
+                refund.Raw = item;
+                return refund;
+            })];
+            return list;
         }
 
         /// <summary>
