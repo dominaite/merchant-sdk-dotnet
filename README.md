@@ -244,9 +244,10 @@ ids).
 `CreateCheckoutSessionWithRetryAsync` sends the request's key on every attempt,
 retrying transport failures (network errors, timeouts, and 5xx including
 `MERCHANT_API_UNAVAILABLE`) and `PAYMENT_PROCESSING_UNAVAILABLE`, which means card payments are
-off for a moment and nothing was created. Every other refusal, storefront refusals and
-authentication failures are thrown immediately - they will not change. `IsRetryable` on any
-`DominaiteException` gives you the same answer for your own retry loop.
+off for a moment and nothing was created. Every other refusal, storefront refusals, and
+authentication and permission failures are thrown immediately - they will not change. A rate limit
+(HTTP 429) is thrown immediately too: wait `RetryAfter`, then call again with the same key.
+`IsRetryable` on any `DominaiteException` gives you the same answer for your own retry loop.
 
 ```csharp
 var session = await client.CreateCheckoutSessionWithRetryAsync(
@@ -721,7 +722,9 @@ machine-readable string where there is one.
 |---|---|---|
 | `DominaiteRefusalException` | HTTP 200 with `success: false`. Carries `TransactionId` and `RawResult`. | Branch on `Code`. Do not blind-retry. |
 | `DominaiteStorefrontException` | Session create refused because of the storefront: `STOREFRONT_NOT_WHITELISTED` or `STOREFRONT_INACTIVE` (409), `STOREFRONT_MISMATCH` (400, or 200 on a replay). Carries `TransactionId` on a replay and `RawResult`. | Configuration, not a retry. See [Storefront errors](#storefront-errors). |
-| `DominaiteAuthException` | 401/403. `Code` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
+| `DominaiteAuthException` | 401. `Code` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
+| `DominaitePermissionException` | 403. The key and the signature were good, but the call is not allowed. `Code` is `INSUFFICIENT_SCOPE` (the key does not have the scope the route needs; the message names it) or `VERIFY_ONLY_NOT_ENABLED`. | Use a key that has the scope. For verify-only: we switch it on for your account, so contact Dominaite support. Never retry-loop. |
+| `DominaiteRateLimitException` | 429. A limit refused the call and nothing was done. `Code` is `RATE_LIMIT_EXCEEDED`, `CHARGE_VELOCITY_EXCEEDED` or `CHARGE_DECLINE_RATE_EXCEEDED` (`RateLimitErrorCodes`). `RetryAfter` is the wait from the `Retry-After` header, or null when there was none. | Wait `RetryAfter` (a few seconds when null), then retry with the **same** idempotency key. `IsRetryable` is false and the retry helper does not retry it. |
 | `DominaiteTransportException` | Network failure, timeout, or a 5xx on session create, status or ping, including one whose body is an HTML error page from a proxy. `Code` keeps the gateway's code when the 5xx carried one. | Retry with the **same** idempotency key. `IsRetryable` is always true here, and elsewhere only for `PAYMENT_PROCESSING_UNAVAILABLE`. |
 | `DominaiteChargeException` | `ChargePaymentMethodAsync` got an error code instead of a charge: 409, 422, 502 or 503. Carries `Charge`, `TransactionId` and `RawResult`. | Branch on `Code` (see [Stored payment methods](#stored-payment-methods-recurring)). `CHARGE_OUTCOME_UNKNOWN` carries the `TransactionId` to poll; never retry it under a new key. |
 | `DominaiteRefundException` | `CreateRefundAsync` or `GetRefundAsync` got an error code instead of a refund: 400, 404, 409 or 422. Carries `RawResult`. | Branch on `Code` (see [Refunds](#refunds)). `IsRetryable` is true for `DUPLICATE_REQUEST` and `REFUND_NOT_FOUND`. |

@@ -175,6 +175,8 @@ public sealed class DominaiteClient : IDisposable
     /// <exception cref="DominaiteRefusalException">The gateway refused the session; inspect Code.</exception>
     /// <exception cref="DominaiteStorefrontException">The storefront is not whitelisted, inactive, or not the key's; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the payments scope, or verify-only sessions are not on for your account.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
     /// <exception cref="DominaiteApiException">An unexpected or rejecting response.</exception>
     /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry with the same key.</exception>
     public async Task<CheckoutSession> CreateCheckoutSessionAsync(
@@ -262,7 +264,9 @@ public sealed class DominaiteClient : IDisposable
     /// key, which is required.
     /// <c>PAYMENT_PROCESSING_UNAVAILABLE</c> is retried too: it arrives as a refusal, but card
     /// payments come back on their own and nothing was created. Every other refusal, storefront
-    /// refusals and authentication failures are thrown immediately: they will not change.
+    /// refusals, and authentication and permission failures are thrown immediately: they will not
+    /// change. A rate limit (HTTP 429) is thrown immediately too: wait
+    /// <see cref="DominaiteRateLimitException.RetryAfter"/>, then call again with the same key.
     /// </remarks>
     /// <param name="request">The session parameters.</param>
     /// <param name="options">Attempts and backoff. Defaults to 3 attempts, 500ms doubling.</param>
@@ -364,6 +368,8 @@ public sealed class DominaiteClient : IDisposable
     /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
     /// <exception cref="DominaiteChargeException">The gateway answered with an error code; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the scope this route needs.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
     /// <exception cref="DominaiteApiException">404 (PAYMENT_METHOD_NOT_FOUND) for a method that is not yours, a 400 validation rejection, or an unexpected response.</exception>
     /// <exception cref="DominaiteTransportException">Network failure, or a 5xx without a gateway code; retry with the same key.</exception>
     public async Task<PaymentMethodCharge> ChargePaymentMethodAsync(
@@ -499,6 +505,8 @@ public sealed class DominaiteClient : IDisposable
     /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
     /// <exception cref="DominaiteRefundException">The gateway answered with an error code; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the scope this route needs.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
     /// <exception cref="DominaiteApiException">An unexpected response.</exception>
     /// <exception cref="DominaiteTransportException">Network failure or 5xx; nothing was queued, retry with the same key.</exception>
     public async Task<Refund> CreateRefundAsync(
@@ -553,6 +561,8 @@ public sealed class DominaiteClient : IDisposable
     /// <exception cref="DominaiteValidationException">Bad arguments; nothing was sent.</exception>
     /// <exception cref="DominaiteRefundException">The gateway answered with an error code; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the scope this route needs.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
     /// <exception cref="DominaiteApiException">An unexpected response.</exception>
     /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
     public async Task<Refund> GetRefundAsync(
@@ -615,9 +625,9 @@ public sealed class DominaiteClient : IDisposable
     /// Signs and sends one call, and parses whatever came back into an <see cref="ApiReply"/>.
     /// </summary>
     /// <remarks>
-    /// Only what no route can use is thrown here: transport failures, a redirect, a 401/403, and
-    /// a body that is not a JSON object (a 5xx of that kind is a retryable transport failure;
-    /// anything else is an API error). Every other status comes back as a reply, so the payment
+    /// Only what no route can use is thrown here: transport failures, a redirect, a 401/403, a
+    /// 429 with its <c>Retry-After</c>, and a body that is not a JSON object (a 5xx of that kind
+    /// is a retryable transport failure; anything else is an API error). Every other status comes back as a reply, so the payment
     /// method routes can read a 402 decline or a coded 502 as the typed answers they are, while
     /// <see cref="RequestAsync"/> rejects them generically.
     /// </remarks>
@@ -719,9 +729,17 @@ public sealed class DominaiteClient : IDisposable
                     innerException: error);
             }
 
+            // A 429 means the same thing whoever sent it, the API or an edge in front of it, so a
+            // body that is not the envelope does not make it a different error.
+            if (status == (int)HttpStatusCode.TooManyRequests)
+            {
+                var retryAfter = ReadRetryAfter(response.Headers.RetryAfter);
+                throw new ApiReply(status, TryParseObject(raw) ?? EmptyPayload, retryAfter).Rejection();
+            }
+
             var reply = new ApiReply(status, ParseEnvelope(status, raw));
 
-            // Credentials are refused the same way on every route.
+            // Credentials and permissions are refused the same way on every route.
             if (status is 401 or 403)
             {
                 throw reply.Rejection();
@@ -742,23 +760,7 @@ public sealed class DominaiteClient : IDisposable
     /// </remarks>
     private static JsonElement ParseEnvelope(int httpStatus, string raw)
     {
-        JsonElement envelope = default;
-        var isObject = false;
-        try
-        {
-            using var document = JsonDocument.Parse(raw);
-            if (document.RootElement.ValueKind == JsonValueKind.Object)
-            {
-                envelope = document.RootElement.Clone();
-                isObject = true;
-            }
-        }
-        catch (JsonException)
-        {
-            // Classified below on the status, like a body of the wrong kind.
-        }
-
-        if (isObject)
+        if (TryParseObject(raw) is { } envelope)
         {
             return envelope;
         }
@@ -773,13 +775,38 @@ public sealed class DominaiteClient : IDisposable
         throw new DominaiteApiException(httpStatus, null, "The Dominaite API returned a non-JSON response.");
     }
 
+    /// <summary>The body as a JSON object, or null when it is not one (not JSON, or another kind).</summary>
+    private static JsonElement? TryParseObject(string raw)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(raw);
+            return document.RootElement.ValueKind == JsonValueKind.Object ? document.RootElement.Clone() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>
-    /// The statuses that stay generic on every route: input validation, credentials, an id that
-    /// is not yours, and rate limiting. A coded answer outside this set is the gateway describing
-    /// a payment method outcome, which the charge and revoke routes surface as
-    /// <see cref="DominaiteChargeException"/> and <see cref="DominaiteRevokeException"/>.
+    /// The wait a <c>Retry-After</c> header asks for: seconds, or a date. Null when there is no
+    /// such header or it cannot be read. A date in the past is no wait at all.
     /// </summary>
-    private static bool IsGenericFailureStatus(int status) => status is 400 or 401 or 403 or 404 or 429;
+    private static TimeSpan? ReadRetryAfter(RetryConditionHeaderValue? header)
+    {
+        var wait = header?.Delta ?? (header?.Date is { } date ? (TimeSpan?)(date - DateTimeOffset.UtcNow) : null);
+        return wait < TimeSpan.Zero ? TimeSpan.Zero : wait;
+    }
+
+    /// <summary>
+    /// The statuses that stay generic on every route: input validation and an id that is not
+    /// yours. A coded answer outside this set is the gateway describing a payment method outcome,
+    /// which the charge and revoke routes surface as <see cref="DominaiteChargeException"/> and
+    /// <see cref="DominaiteRevokeException"/>. Credentials (401), permissions (403) and limits (429)
+    /// never get here: <see cref="SendAsync"/> throws them first.
+    /// </summary>
+    private static bool IsGenericFailureStatus(int status) => status is 400 or 404;
 
     /// <summary>
     /// One parsed gateway answer: the HTTP status and the envelope as sent.
@@ -794,13 +821,17 @@ public sealed class DominaiteClient : IDisposable
     /// </remarks>
     private readonly struct ApiReply
     {
-        public ApiReply(int status, JsonElement envelope)
+        public ApiReply(int status, JsonElement envelope, TimeSpan? retryAfter = null)
         {
             this.Status = status;
             this.Envelope = envelope;
+            this.RetryAfter = retryAfter;
         }
 
         public int Status { get; }
+
+        /// <summary>The wait from the <c>Retry-After</c> header; read on a 429 only.</summary>
+        public TimeSpan? RetryAfter { get; }
 
         /// <summary>The whole body: <c>{ success, data?, error?, metadata }</c>.</summary>
         public JsonElement Envelope { get; }
@@ -851,15 +882,15 @@ public sealed class DominaiteClient : IDisposable
 
         /// <summary>
         /// The refund in <c>data</c> on a success, or the error the answer stands for: a
-        /// <see cref="DominaiteRefundException"/> for a coded 4xx other than credentials and rate
-        /// limiting, the generic rejection for everything else.
+        /// <see cref="DominaiteRefundException"/> for a coded 4xx, the generic rejection for
+        /// everything else. Credentials, permissions and limits never get here.
         /// </summary>
         public Refund ReadRefund()
         {
             if (this.Status >= 400)
             {
                 var code = this.ErrorCode;
-                if (this.Status < 500 && code is not null && this.Status is not (401 or 403 or 429))
+                if (this.Status < 500 && code is not null)
                 {
                     throw new DominaiteRefundException(
                         this.Status,
@@ -902,9 +933,10 @@ public sealed class DominaiteClient : IDisposable
         }
 
         /// <summary>
-        /// The generic error for a 4xx or 5xx: a 5xx is a retryable transport failure, a 401/403
-        /// an auth failure, and any other 4xx a <see cref="DominaiteApiException"/> that keeps the
-        /// code (IDEMPOTENCY_KEY_REQUIRED on a 400 is the whole point of the rejection).
+        /// The generic error for a 4xx or 5xx: a 5xx is a retryable transport failure, a 401 an
+        /// auth failure, a 403 a permission failure, a 429 a rate limit, and any other 4xx a
+        /// <see cref="DominaiteApiException"/> that keeps the code (IDEMPOTENCY_KEY_REQUIRED on a
+        /// 400 is the whole point of the rejection).
         /// </summary>
         public DominaiteException Rejection()
         {
@@ -918,15 +950,41 @@ public sealed class DominaiteClient : IDisposable
 
             var code = this.ErrorCode;
             var message = this.ErrorMessage;
-            if (this.Status is 401 or 403)
+            switch (this.Status)
             {
-                return new DominaiteAuthException(
-                    code ?? "UNAUTHORIZED",
-                    message ?? "Authentication failed - check your key id, secret, and server clock.",
-                    this.Status);
+                case 401:
+                    return new DominaiteAuthException(
+                        code ?? "UNAUTHORIZED",
+                        message ?? "Authentication failed - check your key id, secret, and server clock.",
+                        this.Status);
+                case 403:
+                    return Forbidden(code, message);
+                case 429:
+                    return new DominaiteRateLimitException(
+                        code,
+                        message ?? "Too many requests (HTTP 429). Wait, then retry with the same idempotency key.",
+                        this.RetryAfter);
+                default:
+                    return new DominaiteApiException(this.Status, code, message ?? "Request rejected");
             }
+        }
 
-            return new DominaiteApiException(this.Status, code, message ?? "Request rejected");
+        /// <summary>
+        /// A 403 with a message of its own per code. The credentials were good, so the 401 hint
+        /// about the key id, the secret and the clock would send the caller the wrong way.
+        /// </summary>
+        private static DominaitePermissionException Forbidden(string? code, string? message)
+        {
+            var text = code switch
+            {
+                PermissionErrorCodes.InsufficientScope =>
+                    $"{(message ?? "This API key does not have the scope this route requires").TrimEnd('.')}. Use an API key that has this scope.",
+                PermissionErrorCodes.VerifyOnlyNotEnabled =>
+                    "Verify-only sessions are not enabled for this account. We switch it on for your account. Contact Dominaite support to ask for it.",
+                _ => message ?? "This API key is not allowed to make this call (HTTP 403).",
+            };
+
+            return new DominaitePermissionException(code ?? "FORBIDDEN", text);
         }
     }
 

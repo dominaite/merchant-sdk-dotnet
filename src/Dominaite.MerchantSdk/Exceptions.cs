@@ -108,9 +108,13 @@ public sealed class DominaiteRefusalException : DominaiteException
 }
 
 /// <summary>
-/// The API rejected your credentials or signature (HTTP 401/403). Not retryable: fix the key id,
+/// The API rejected your credentials or signature (HTTP 401). Not retryable: fix the key id,
 /// the secret, the server clock, or the caller allowlist.
 /// </summary>
+/// <remarks>
+/// A 403 is not this exception. A 403 means the credentials were good but the call is not
+/// allowed: that is <see cref="DominaitePermissionException"/>.
+/// </remarks>
 public sealed class DominaiteAuthException : DominaiteException
 {
     /// <summary>Initializes a new instance of the <see cref="DominaiteAuthException"/> class.</summary>
@@ -144,6 +148,87 @@ public static class PermissionErrorCodes
 
     /// <summary>Every 403 code above.</summary>
     public static IReadOnlyList<string> All { get; } = [InsufficientScope, VerifyOnlyNotEnabled];
+}
+
+/// <summary>
+/// The key and the signature were good, but this call is not allowed (HTTP 403). Not retryable:
+/// the same call with the same key gets the same answer.
+/// </summary>
+/// <remarks>
+/// <see cref="DominaiteException.Code"/> is one of <see cref="PermissionErrorCodes"/>.
+/// <c>INSUFFICIENT_SCOPE</c>: use an API key that has the scope the message names.
+/// <c>VERIFY_ONLY_NOT_ENABLED</c>: verify-only sessions are off for your account. We switch it on
+/// for your account; ask Dominaite support.
+/// </remarks>
+public sealed class DominaitePermissionException : DominaiteException
+{
+    /// <summary>Initializes a new instance of the <see cref="DominaitePermissionException"/> class.</summary>
+    /// <param name="code">The 403 code, usually one of <see cref="PermissionErrorCodes"/>.</param>
+    /// <param name="message">What is not allowed and what to do.</param>
+    public DominaitePermissionException(string code, string message)
+        : base(message)
+    {
+        this.Code = code;
+        this.HttpStatus = 403;
+    }
+}
+
+/// <summary>
+/// The HTTP 429 codes. Each one means a limit refused the call and nothing was done.
+/// </summary>
+public static class RateLimitErrorCodes
+{
+    /// <summary>Too many requests with this API key. Wait, then send the call again.</summary>
+    public const string RateLimitExceeded = "RATE_LIMIT_EXCEEDED";
+
+    /// <summary>
+    /// A stored-card charge would go past a volume limit: the charges allowed on one payment
+    /// method in 24 hours, or the amount allowed per hour in one currency. Nothing was charged.
+    /// </summary>
+    public const string ChargeVelocityExceeded = "CHARGE_VELOCITY_EXCEEDED";
+
+    /// <summary>
+    /// This API key collected too many declined charges in a short time, so its charge route is
+    /// locked for a while. Nothing was charged.
+    /// </summary>
+    public const string ChargeDeclineRateExceeded = "CHARGE_DECLINE_RATE_EXCEEDED";
+
+    /// <summary>Every 429 code above.</summary>
+    public static IReadOnlyList<string> All { get; } = [RateLimitExceeded, ChargeVelocityExceeded, ChargeDeclineRateExceeded];
+}
+
+/// <summary>
+/// A limit refused the call (HTTP 429). Nothing was done. Wait <see cref="RetryAfter"/>, then
+/// send the call again with the SAME idempotency key.
+/// </summary>
+/// <remarks>
+/// <see cref="DominaiteException.Code"/> says which limit (<see cref="RateLimitErrorCodes"/>), and
+/// is null when the 429 did not come from the API itself. <see cref="DominaiteException.IsRetryable"/>
+/// is false and <see cref="DominaiteClient.CreateCheckoutSessionWithRetryAsync"/> does not retry
+/// it: a retry before the wait is over meets the same limit.
+/// </remarks>
+public sealed class DominaiteRateLimitException : DominaiteException
+{
+    /// <summary>Initializes a new instance of the <see cref="DominaiteRateLimitException"/> class.</summary>
+    /// <param name="code">The 429 code, when the API sent one.</param>
+    /// <param name="message">Which limit, and what to do.</param>
+    /// <param name="retryAfter">The wait the API asked for in its <c>Retry-After</c> header, when it sent one.</param>
+    public DominaiteRateLimitException(string? code, string message, TimeSpan? retryAfter)
+        : base(message)
+    {
+        this.Code = code;
+        this.HttpStatus = 429;
+        this.RetryAfter = retryAfter;
+    }
+
+    /// <summary>
+    /// How long to wait before the next attempt, from the <c>Retry-After</c> header. Null when the
+    /// API sent no such header: then wait at least a few seconds, and longer on each new 429.
+    /// </summary>
+    public TimeSpan? RetryAfter { get; }
+
+    /// <inheritdoc />
+    public override bool IsRetryable => false;
 }
 
 /// <summary>
