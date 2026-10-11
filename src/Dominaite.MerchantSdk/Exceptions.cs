@@ -419,7 +419,12 @@ public static class ChargeErrorCodes
     /// </summary>
     public const string ChargeFailed = "CHARGE_FAILED";
 
-    /// <summary>HTTP 503: charges of stored methods are switched off; nothing was charged. Retry later with the SAME key.</summary>
+    /// <summary>
+    /// HTTP 503: nothing was charged. We send this code before we switch stored-card charges on for
+    /// your account, and when we pause charges for a short time. The code is the same in both
+    /// cases. If we never switched stored-card charges on for your account, a retry does not help:
+    /// ask Dominaite support. If they are on, retry later with the SAME key.
+    /// </summary>
     public const string PaymentMethodChargesDisabled = "PAYMENT_METHOD_CHARGES_DISABLED";
 
     /// <summary>HTTP 503: card payments are off right now; nothing was charged. Retry later with the SAME key.</summary>

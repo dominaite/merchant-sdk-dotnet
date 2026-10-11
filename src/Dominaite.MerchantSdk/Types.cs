@@ -579,7 +579,10 @@ public static class AgreementStatuses
     /// <summary>Created, with no card on file and nothing charged yet. Its subscription session activates it.</summary>
     public const string Pending = "pending";
 
-    /// <summary>The first period is paid and the card is on file. The platform charges each period.</summary>
+    /// <summary>
+    /// The first period is paid and the card is on file. With scheduled charges on, the platform
+    /// charges each period.
+    /// </summary>
     public const string Active = "active";
 
     /// <summary>
