@@ -62,6 +62,12 @@ public sealed class DominaiteClient : IDisposable
     /// </summary>
     public const string AgreementsPath = "/merchant-api/agreements";
 
+    /// <summary>
+    /// The webhook endpoints path. POST registers an endpoint and GET lists them; DELETE
+    /// <c>WebhooksPath/{webhookId}</c> removes one.
+    /// </summary>
+    public const string WebhooksPath = "/merchant-api/webhooks";
+
     /// <summary>This SDK's version, reported in the User-Agent.</summary>
     public const string Version = "0.4.0";
 
@@ -864,6 +870,96 @@ public sealed class DominaiteClient : IDisposable
         reply.ReadNothing();
     }
 
+    /// <summary>
+    /// Registers a webhook endpoint: a URL that receives the events you name. Needs an API key
+    /// with the <c>webhooks:manage</c> scope.
+    /// </summary>
+    /// <remarks>
+    /// Store <see cref="WebhookEndpoint.Secret"/> from this answer: no other answer has it. A
+    /// retry with the same key returns the same endpoint without the secret. If you lost the
+    /// secret, delete the endpoint and register it again with a new key. On
+    /// <c>WEBHOOK_ALREADY_REGISTERED</c> the key was used for an endpoint that still exists, and
+    /// its id is in <c>error.params.webhookId</c> of
+    /// <see cref="DominaiteApiException.RawResult"/>.
+    /// </remarks>
+    /// <param name="request">
+    /// The endpoint. <see cref="CreateWebhookEndpointRequest.IdempotencyKey"/> is required.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The endpoint with its signing secret.</returns>
+    /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>webhooks:manage</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
+    /// <exception cref="DominaiteApiException">
+    /// The gateway refused the endpoint; inspect Code. HTTP 400 <c>WEBHOOK_URL_REJECTED</c>, or
+    /// <c>VALIDATION_ERROR</c> for another field (the field errors are in RawResult); 409
+    /// <c>WEBHOOK_LIMIT_REACHED</c>, <c>WEBHOOK_ALREADY_REGISTERED</c>, or
+    /// <c>DUPLICATE_REQUEST</c> while the first call with this key still runs (retry shortly with
+    /// the same key); 422 <c>IDEMPOTENCY_KEY_REUSED</c>.
+    /// </exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry with the same key.</exception>
+    public async Task<WebhookEndpoint> CreateWebhookEndpointAsync(
+        CreateWebhookEndpointRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
+        var body = SerializeWithExtra(request, request.Extra);
+        var data = await this.CreateAsync(WebhooksPath, body, idempotencyKey, "webhook endpoint", cancellationToken)
+            .ConfigureAwait(false);
+        return ToWebhookEndpoint(data);
+    }
+
+    /// <summary>
+    /// Lists your webhook endpoints, active and inactive, newest first. Needs an API key with the
+    /// <c>webhooks:manage</c> scope.
+    /// </summary>
+    /// <remarks>The list has no pages, and it never has the signing secrets.</remarks>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The endpoints. Empty when you have none.</returns>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>webhooks:manage</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">An unexpected response.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<IReadOnlyList<WebhookEndpoint>> ListWebhookEndpointsAsync(CancellationToken cancellationToken = default)
+    {
+        var reply = await this.SendAsync(HttpMethod.Get, WebhooksPath, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        return [.. reply.ReadArray("webhook endpoint list").EnumerateArray().Select(ToWebhookEndpoint)];
+    }
+
+    /// <summary>
+    /// Removes a webhook endpoint: it receives no more deliveries. Needs an API key with the
+    /// <c>webhooks:manage</c> scope.
+    /// </summary>
+    /// <remarks>
+    /// A retry after a lost answer gets <c>WEBHOOK_NOT_FOUND</c> (HTTP 404): the endpoint is
+    /// already gone.
+    /// </remarks>
+    /// <param name="webhookId">The <see cref="WebhookEndpoint.Id"/>.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>A task that completes once the endpoint is removed.</returns>
+    /// <exception cref="DominaiteValidationException">The id is not a UUID; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>webhooks:manage</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 404 <c>WEBHOOK_NOT_FOUND</c> for an id that is not one of your endpoints.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task DeleteWebhookEndpointAsync(
+        string webhookId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(webhookId);
+
+        var path = $"{WebhooksPath}/{NormalizeWebhookId(webhookId)}";
+        var reply = await this.SendAsync(HttpMethod.Delete, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        reply.ReadNothing();
+    }
+
     /// <summary>Releases the HttpClient this instance created for itself.</summary>
     public void Dispose()
     {
@@ -1512,6 +1608,29 @@ public sealed class DominaiteClient : IDisposable
         }
 
         return trimmed;
+    }
+
+    /// <summary>
+    /// A webhook endpoint id in the lowercase hyphenated form the gateway signs, or a validation
+    /// error.
+    /// </summary>
+    private static string NormalizeWebhookId(string webhookId)
+    {
+        var normalized = webhookId.Trim().ToLowerInvariant();
+        if (!Guid.TryParseExact(normalized, "D", out _))
+        {
+            throw new DominaiteValidationException(
+                "webhookId must be the WebhookEndpoint.Id from CreateWebhookEndpointAsync or ListWebhookEndpointsAsync");
+        }
+
+        return normalized;
+    }
+
+    private static WebhookEndpoint ToWebhookEndpoint(JsonElement data)
+    {
+        var endpoint = Deserialize<WebhookEndpoint>(data, "webhook endpoint");
+        endpoint.Raw = data;
+        return endpoint;
     }
 
     private static Plan ToPlan(JsonElement data)
