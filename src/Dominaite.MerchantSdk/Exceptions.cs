@@ -126,6 +126,27 @@ public sealed class DominaiteAuthException : DominaiteException
 }
 
 /// <summary>
+/// The HTTP 403 codes. The key and the signature were good, but this call is not allowed.
+/// </summary>
+public static class PermissionErrorCodes
+{
+    /// <summary>
+    /// HTTP 403: the API key does not have the scope this route needs. The message names the
+    /// scope. Use a key that has it; retrying with the same key will not help.
+    /// </summary>
+    public const string InsufficientScope = "INSUFFICIENT_SCOPE";
+
+    /// <summary>
+    /// HTTP 403 on session create: verify-only sessions are not on for your account. Nothing was
+    /// created and the idempotency key is not used up.
+    /// </summary>
+    public const string VerifyOnlyNotEnabled = "VERIFY_ONLY_NOT_ENABLED";
+
+    /// <summary>Every 403 code above.</summary>
+    public static IReadOnlyList<string> All { get; } = [InsufficientScope, VerifyOnlyNotEnabled];
+}
+
+/// <summary>
 /// The API answered, but with a rejecting or unexpected response. A 400 carries a validation
 /// code such as <c>IDEMPOTENCY_KEY_REQUIRED</c>; a 404 from <see cref="DominaiteClient.GetStatusAsync"/>
 /// means an unknown transaction id, and from the payment method routes an id that is not yours
