@@ -46,6 +46,22 @@ public class WireContractTests
     }
 
     [Fact]
+    public void AuthorizationCodes_AreKnown403s_AndNoneIsRetryable()
+    {
+        var authorization = Wire().GetProperty("errorCodes").GetProperty("authorization").EnumerateArray().ToList();
+
+        Assert.Equal(
+            new[] { PermissionErrorCodes.InsufficientScope },
+            authorization.Select(entry => entry.GetProperty("code").GetString()));
+        Assert.All(authorization, entry =>
+        {
+            Assert.Contains(entry.GetProperty("code").GetString(), PermissionErrorCodes.All);
+            Assert.Equal(403, entry.GetProperty("httpStatus").GetInt32());
+            Assert.Equal(JsonValueKind.False, entry.GetProperty("retry").ValueKind);
+        });
+    }
+
+    [Fact]
     public void WalletTypes_MatchTheGateway_InOrder()
     {
         Assert.Equal(Strings(Wire().GetProperty("wallets").GetProperty("walletTypes")), WalletTypes.All);

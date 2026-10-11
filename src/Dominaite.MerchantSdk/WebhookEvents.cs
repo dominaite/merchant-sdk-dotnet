@@ -46,6 +46,19 @@ public static class WebhookEventTypes
 
     /// <summary>The charge was declined and nothing more will be tried for it.</summary>
     public const string ChargeFailed = "charge.failed";
+
+    /// <summary>
+    /// A verify-only session checked the card and saved it. No money was taken. Fires once per
+    /// session.
+    /// </summary>
+    public const string VerificationSucceeded = "verification.succeeded";
+
+    /// <summary>
+    /// A verify-only session ended without a usable card: the issuer declined, or the payer
+    /// abandoned the checkout. The payer can retry after a decline, so a
+    /// <see cref="VerificationSucceeded"/> can follow.
+    /// </summary>
+    public const string VerificationFailed = "verification.failed";
 }
 
 /// <summary>
@@ -83,7 +96,10 @@ public sealed class WebhookEvent
     [JsonIgnore]
     public JsonElement Data { get; set; }
 
-    /// <summary>The <c>data</c> of a <c>payment.*</c> event, typed; null for every other type.</summary>
+    /// <summary>
+    /// The <c>data</c> of a <c>payment.*</c> or <c>verification.*</c> event, typed; null for every
+    /// other type.
+    /// </summary>
     [JsonIgnore]
     public PaymentEventData? Payment { get; set; }
 
@@ -101,13 +117,15 @@ public sealed class WebhookEvent
 }
 
 /// <summary>
-/// The <c>data</c> of a <c>payment.*</c> event: the payment's transition, its amounts, your
-/// correlation fields and, when one was stored with the approval, the saved card.
+/// The <c>data</c> of a <c>payment.*</c> or <c>verification.*</c> event: the payment's
+/// transition, its amounts, your correlation fields and, when one was stored with the approval,
+/// the saved card.
 /// </summary>
 /// <remarks>
-/// <c>payment.*</c> events carry no sequence: dedupe them on <see cref="WebhookEvent.Id"/> and
-/// read the status when order matters. Nullable fields may arrive as null or be absent; both read
-/// as null.
+/// <c>payment.*</c> and <c>verification.*</c> events carry no sequence: dedupe them on
+/// <see cref="WebhookEvent.Id"/> and read the status when order matters. Nullable fields may
+/// arrive as null or be absent; both read as null. A verify-only session sends only
+/// <c>verification.*</c> events, never <c>payment.*</c> events.
 /// </remarks>
 public sealed class PaymentEventData
 {
@@ -202,6 +220,23 @@ public sealed class PaymentEventData
     /// <see cref="DominaiteClient.GetStatusAsync"/>.
     /// </remarks>
     public StoredPaymentMethod? StoredPaymentMethod { get; set; }
+
+    /// <summary>
+    /// True on every <c>verification.*</c> event: the session only checked and saved a card, and
+    /// took no money. False on <c>payment.*</c> events, and on a server that predates the field.
+    /// </summary>
+    public bool VerifyOnly { get; set; }
+
+    /// <summary>
+    /// Why the payment failed, on <c>payment.failed</c> and <c>verification.failed</c>: one of the
+    /// <see cref="DeclineClasses"/> values, or a value added later, with the same values as
+    /// <see cref="CheckoutStatus.DeclineClass"/>. It can be null, for example when nobody declined
+    /// the payment.
+    /// </summary>
+    /// <remarks>
+    /// The event carries the class known when it was sent. The status read carries the current one.
+    /// </remarks>
+    public string? DeclineClass { get; set; }
 
     /// <summary>The <c>data</c> object as sent, for fields this class does not model yet.</summary>
     [JsonIgnore]
@@ -323,7 +358,10 @@ public sealed class ChargeEventData
     /// <summary>The charge description, when there is one.</summary>
     public string? Description { get; set; }
 
-    /// <summary>One of the <see cref="DeclineClasses"/> values on a decline; null otherwise, or while unclassified.</summary>
+    /// <summary>
+    /// One of the <see cref="DeclineClasses"/> values on a decline. It can be null, for example
+    /// when nobody declined the charge.
+    /// </summary>
     public string? DeclineClass { get; set; }
 
     /// <summary>The provider's raw decline code, for your logs.</summary>

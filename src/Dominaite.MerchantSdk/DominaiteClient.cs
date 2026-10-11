@@ -37,6 +37,9 @@ public sealed class DominaiteClient : IDisposable
     /// <summary>The credentials-and-clock smoke test. Creates nothing.</summary>
     public const string PingPath = "/merchant-api/ping";
 
+    /// <summary>The public integration contract. The API answers it without a signature.</summary>
+    public const string IntegrationContractPath = "/merchant-api/integration/contract";
+
     /// <summary>
     /// The stored payment methods path. POST <c>PaymentMethodsPath/{id}/charges</c> charges a
     /// stored card; DELETE <c>PaymentMethodsPath/{id}</c> revokes it.
@@ -45,12 +48,37 @@ public sealed class DominaiteClient : IDisposable
 
     /// <summary>
     /// The payments path. POST <c>PaymentsPath/{transactionId}/refunds</c> refunds a payment; GET
+    /// <c>PaymentsPath/{transactionId}/refunds</c> lists its refunds, and GET
     /// <c>PaymentsPath/{transactionId}/refunds/{refundId}</c> reads one refund.
     /// </summary>
     public const string PaymentsPath = "/merchant-api/payments";
 
+    /// <summary>
+    /// The subscription plans path. POST creates a plan and GET lists them; GET, PATCH and DELETE
+    /// <c>PlansPath/{planId}</c> read, update and archive one plan.
+    /// </summary>
+    public const string PlansPath = "/merchant-api/plans";
+
+    /// <summary>
+    /// The subscription agreements path. POST creates an agreement; GET and DELETE
+    /// <c>AgreementsPath/{agreementId}</c> read and cancel one.
+    /// </summary>
+    public const string AgreementsPath = "/merchant-api/agreements";
+
+    /// <summary>
+    /// The webhook endpoints path. POST registers an endpoint and GET lists them; DELETE
+    /// <c>WebhooksPath/{webhookId}</c> removes one.
+    /// </summary>
+    public const string WebhooksPath = "/merchant-api/webhooks";
+
+    /// <summary>
+    /// The transaction list path. GET lists your payments in a time window. The query parameters
+    /// are not part of the signed path.
+    /// </summary>
+    public const string TransactionsPath = "/merchant-api/transactions";
+
     /// <summary>This SDK's version, reported in the User-Agent.</summary>
-    public const string Version = "0.4.0";
+    public const string Version = "0.5.0";
 
     private const string KeyIdPrefix = "dmk_";
     private const string SecretPrefix = "dms_";
@@ -58,7 +86,7 @@ public sealed class DominaiteClient : IDisposable
     /// <summary>
     /// The wire encoding. camelCase to match the gateway, nulls omitted, and the relaxed encoder
     /// so non-ASCII payer names travel as UTF-8 rather than <c>\uXXXX</c> escapes - which is what
-    /// every other Dominaite SDK puts on the wire.
+    /// every other Dominaite SDK puts on the wire. Dates are written in UTC with a <c>Z</c>.
     /// </summary>
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -66,12 +94,13 @@ public sealed class DominaiteClient : IDisposable
         PropertyNameCaseInsensitive = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        Converters = { new UtcDateConverter() },
     };
 
     /// <summary>
-    /// A payment method or refund id is one path segment and nothing else: it is interpolated into
-    /// the signed path, so anything that could split, escape or extend that path is refused before
-    /// signing.
+    /// A payment method, refund, plan or agreement id is one path segment and nothing else: it is
+    /// interpolated into the signed path, so anything that could split, escape or extend that path
+    /// is refused before signing.
     /// </summary>
     private static readonly Regex IdSegmentPattern = new("^[A-Za-z0-9_-]{1,100}$", RegexOptions.CultureInvariant);
 
@@ -163,6 +192,31 @@ public sealed class DominaiteClient : IDisposable
     }
 
     /// <summary>
+    /// Reads the public integration contract of the API this client calls: its version, the status
+    /// and event vocabularies, the consent wording versions, and everything else in
+    /// <see cref="IntegrationContract.Raw"/>.
+    /// </summary>
+    /// <remarks>
+    /// The route needs no credentials, so any key works. The SDK signs the call like every other
+    /// one, and the API does not check the signature on this route.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The contract.</returns>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">An unexpected response.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<IntegrationContract> GetIntegrationContractAsync(CancellationToken cancellationToken = default)
+    {
+        // GET signs an EMPTY idempotency key and an EMPTY body.
+        var reply = await this.SendAsync(HttpMethod.Get, IntegrationContractPath, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        var data = reply.ReadObject("integration contract");
+        var contract = Deserialize<IntegrationContract>(data, "integration contract");
+        contract.Raw = data;
+        return contract;
+    }
+
+    /// <summary>
     /// Opens a hosted checkout session for one payment.
     /// </summary>
     /// <param name="request">
@@ -175,6 +229,8 @@ public sealed class DominaiteClient : IDisposable
     /// <exception cref="DominaiteRefusalException">The gateway refused the session; inspect Code.</exception>
     /// <exception cref="DominaiteStorefrontException">The storefront is not whitelisted, inactive, or not the key's; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the payments scope, or verify-only sessions are not on for your account.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
     /// <exception cref="DominaiteApiException">An unexpected or rejecting response.</exception>
     /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry with the same key.</exception>
     public async Task<CheckoutSession> CreateCheckoutSessionAsync(
@@ -262,7 +318,9 @@ public sealed class DominaiteClient : IDisposable
     /// key, which is required.
     /// <c>PAYMENT_PROCESSING_UNAVAILABLE</c> is retried too: it arrives as a refusal, but card
     /// payments come back on their own and nothing was created. Every other refusal, storefront
-    /// refusals and authentication failures are thrown immediately: they will not change.
+    /// refusals, and authentication and permission failures are thrown immediately: they will not
+    /// change. A rate limit (HTTP 429) is thrown immediately too: wait
+    /// <see cref="DominaiteRateLimitException.RetryAfter"/>, then call again with the same key.
     /// </remarks>
     /// <param name="request">The session parameters.</param>
     /// <param name="options">Attempts and backoff. Defaults to 3 attempts, 500ms doubling.</param>
@@ -347,8 +405,10 @@ public sealed class DominaiteClient : IDisposable
     /// <remarks>
     /// Returns the charge on HTTP 201 (200 on a durable replay of the same key) and on HTTP 402
     /// alike. A decline is a result, not an exception: the 402 charge has
-    /// <see cref="ChargeStatuses.Failed"/> and a <see cref="PaymentMethodCharge.DeclineClass"/> to
-    /// branch on. <see cref="ChargeStatuses.Pending"/> is not terminal: poll
+    /// <see cref="ChargeStatuses.Failed"/>. Its <see cref="PaymentMethodCharge.DeclineClass"/> can
+    /// be null, for example when nobody declined the charge; the status read carries the current
+    /// class.
+    /// <see cref="ChargeStatuses.Pending"/> is not terminal: poll
     /// <see cref="GetStatusAsync"/> with the charge's transaction id. What throws
     /// <see cref="DominaiteChargeException"/> is the gateway answering with a code instead of a
     /// charge (409, 422, 502, 503); <c>CHARGE_OUTCOME_UNKNOWN</c> carries the charge row to poll
@@ -364,6 +424,8 @@ public sealed class DominaiteClient : IDisposable
     /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
     /// <exception cref="DominaiteChargeException">The gateway answered with an error code; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the scope this route needs.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
     /// <exception cref="DominaiteApiException">404 (PAYMENT_METHOD_NOT_FOUND) for a method that is not yours, a 400 validation rejection, or an unexpected response.</exception>
     /// <exception cref="DominaiteTransportException">Network failure, or a 5xx without a gateway code; retry with the same key.</exception>
     public async Task<PaymentMethodCharge> ChargePaymentMethodAsync(
@@ -393,7 +455,7 @@ public sealed class DominaiteClient : IDisposable
 
         // 201 (200 on a durable replay): the charge was placed, whatever its status. 402: the
         // provider declined; the envelope says success=false but the charge is right there,
-        // status failed with its decline class, so it is a result, not an exception.
+        // status failed (its decline class can be null), so it is a result, not an exception.
         var charge = reply.Charge();
         if (charge is not null && (reply.Success || reply.Status == 402))
         {
@@ -499,6 +561,8 @@ public sealed class DominaiteClient : IDisposable
     /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
     /// <exception cref="DominaiteRefundException">The gateway answered with an error code; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the scope this route needs.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
     /// <exception cref="DominaiteApiException">An unexpected response.</exception>
     /// <exception cref="DominaiteTransportException">Network failure or 5xx; nothing was queued, retry with the same key.</exception>
     public async Task<Refund> CreateRefundAsync(
@@ -553,6 +617,8 @@ public sealed class DominaiteClient : IDisposable
     /// <exception cref="DominaiteValidationException">Bad arguments; nothing was sent.</exception>
     /// <exception cref="DominaiteRefundException">The gateway answered with an error code; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the scope this route needs.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
     /// <exception cref="DominaiteApiException">An unexpected response.</exception>
     /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
     public async Task<Refund> GetRefundAsync(
@@ -570,6 +636,413 @@ public sealed class DominaiteClient : IDisposable
         var reply = await this.SendAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
             .ConfigureAwait(false);
         return reply.ReadRefund();
+    }
+
+    /// <summary>
+    /// Lists the refunds of one payment, newest first, with the amount refunded so far and the
+    /// amount you can still refund.
+    /// </summary>
+    /// <remarks>
+    /// Read <see cref="RefundList.RefundableAmount"/> before a partial refund. A payment without
+    /// refunds gives an empty list.
+    /// </remarks>
+    /// <param name="transactionId">The payment: the id a checkout session or a charge returned.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The refunds and the two totals.</returns>
+    /// <exception cref="DominaiteValidationException">Bad arguments; nothing was sent.</exception>
+    /// <exception cref="DominaiteRefundException">The gateway answered with an error code, e.g. <c>PAYMENT_NOT_FOUND</c> for an unknown or foreign payment; inspect Code.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the scope this route needs.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">An unexpected response.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<RefundList> ListRefundsAsync(
+        string transactionId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(transactionId);
+
+        var path = $"{PaymentsPath}/{NormalizeTransactionId(transactionId)}/refunds";
+
+        // GET signs an EMPTY idempotency key and an EMPTY body, and sends no Idempotency-Key
+        // header.
+        var reply = await this.SendAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        return reply.ReadRefundList();
+    }
+
+    /// <summary>
+    /// Creates a subscription plan: a price you bill every period. Subscribe a customer to it with
+    /// an agreement.
+    /// </summary>
+    /// <remarks>
+    /// Amount, currency and interval cannot change later: a new price is a new plan. A retry with
+    /// the same key and the same body returns the plan made the first time.
+    /// </remarks>
+    /// <param name="request">
+    /// The plan. <see cref="CreatePlanRequest.IdempotencyKey"/> is required: derive it from your own
+    /// plan or product id.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The plan, with the <c>plan_</c> id the other plan routes take.</returns>
+    /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 400 for a field the gateway refused (the field errors are in RawResult), or 422 <c>IDEMPOTENCY_KEY_REUSED</c> for a key first used for another plan.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry with the same key.</exception>
+    public async Task<Plan> CreatePlanAsync(
+        CreatePlanRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
+        var body = SerializeWithExtra(request, request.Extra);
+        var data = await this.CreateAsync(PlansPath, body, idempotencyKey, "plan", cancellationToken)
+            .ConfigureAwait(false);
+        return ToPlan(data);
+    }
+
+    /// <summary>
+    /// Lists your plans: the active ones first, then the archived ones, each group newest first.
+    /// </summary>
+    /// <remarks>The list has no pages. It holds at most 200 plans.</remarks>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The plans. Empty when you have none.</returns>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">An unexpected response.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<IReadOnlyList<Plan>> ListPlansAsync(CancellationToken cancellationToken = default)
+    {
+        var reply = await this.SendAsync(HttpMethod.Get, PlansPath, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        return [.. reply.ReadArray("plan list").EnumerateArray().Select(ToPlan)];
+    }
+
+    /// <summary>Reads one plan.</summary>
+    /// <param name="planId">The <see cref="Plan.Id"/>.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The plan as it is now.</returns>
+    /// <exception cref="DominaiteValidationException">The id is not one path segment; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 404 <c>PLAN_NOT_FOUND</c> for an id that is not one of your plans, or 400 for an id that is not a plan id.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<Plan> GetPlanAsync(
+        string planId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(planId);
+
+        var path = $"{PlansPath}/{NormalizeHandle(planId, "planId must be the Plan.Id from CreatePlanAsync")}";
+        var reply = await this.SendAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        return ToPlan(reply.ReadObject("plan"));
+    }
+
+    /// <summary>
+    /// Changes the name, the trial or the cancel page of a plan. The price, the currency and the
+    /// interval cannot change.
+    /// </summary>
+    /// <remarks>
+    /// The PATCH sends only the fields you set and no idempotency key: sending the same change
+    /// again gives the same plan. A new trial applies to agreements created from now on. A new
+    /// cancel page shows on the customers' next emails.
+    /// </remarks>
+    /// <param name="planId">The <see cref="Plan.Id"/>.</param>
+    /// <param name="request">The changes. Set at least one field.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The plan after the change.</returns>
+    /// <exception cref="DominaiteValidationException">The id is not one path segment, or the request changes nothing; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 404 <c>PLAN_NOT_FOUND</c>, or 400 for a field the gateway refused (the field errors are in RawResult).</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<Plan> UpdatePlanAsync(
+        string planId,
+        UpdatePlanRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(planId);
+        ArgumentNullException.ThrowIfNull(request);
+
+        var path = $"{PlansPath}/{NormalizeHandle(planId, "planId must be the Plan.Id from CreatePlanAsync")}";
+        var body = SerializeWithExtra(request, request.Extra);
+        if (body == "{}")
+        {
+            throw new DominaiteValidationException("Set at least one of Name, TrialDays or CancelUrl");
+        }
+
+        // The gateway takes no Idempotency-Key on PATCH, so the SDK signs an empty one and sends
+        // no header.
+        var reply = await this.SendAsync(HttpMethod.Patch, path, body, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        return ToPlan(reply.ReadObject("plan"));
+    }
+
+    /// <summary>
+    /// Archives a plan: it takes no new agreements. The agreements on it continue at their own
+    /// price.
+    /// </summary>
+    /// <remarks>
+    /// Resolves on HTTP 204, and again on a plan that is already archived, so a retry is safe. An
+    /// archived plan stays readable with <see cref="GetPlanAsync"/>.
+    /// </remarks>
+    /// <param name="planId">The <see cref="Plan.Id"/>.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>A task that completes once the plan is archived.</returns>
+    /// <exception cref="DominaiteValidationException">The id is not one path segment; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 404 <c>PLAN_NOT_FOUND</c> for an id that is not one of your plans.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task DeletePlanAsync(
+        string planId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(planId);
+
+        var path = $"{PlansPath}/{NormalizeHandle(planId, "planId must be the Plan.Id from CreatePlanAsync")}";
+        var reply = await this.SendAsync(HttpMethod.Delete, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        reply.ReadNothing();
+    }
+
+    /// <summary>
+    /// Subscribes one of your customers to a plan. The agreement starts <c>pending</c> and nothing
+    /// is charged.
+    /// </summary>
+    /// <remarks>
+    /// Then create a checkout session with <see cref="CheckoutSessionRequest.AgreementId"/>: the
+    /// paid session saves the card and activates the agreement. After that the platform charges
+    /// each period and sends <c>agreement.*</c> and <c>charge.*</c> webhooks.
+    /// </remarks>
+    /// <param name="request">
+    /// The agreement. <see cref="CreateAgreementRequest.IdempotencyKey"/> is required: derive it from
+    /// your own subscription id.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The agreement, with the <c>agr_</c> id the session and the other agreement routes take.</returns>
+    /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
+    /// <exception cref="DominaiteApiException">
+    /// The gateway refused the agreement; inspect Code. HTTP 404 <c>PLAN_NOT_FOUND</c> or
+    /// <c>PAYMENT_METHOD_NOT_FOUND</c>; 409 <c>PLAN_NOT_ACTIVE</c> or <c>PAYMENT_METHOD_NOT_ACTIVE</c>;
+    /// 422 <c>AGREEMENT_CONSENT_REQUIRED</c>, <c>PAYMENT_METHOD_CURRENCY_MISMATCH</c>,
+    /// <c>PAYMENT_METHOD_CURRENCY_UNKNOWN</c>, <c>MAX_AMOUNT_BELOW_PLAN_AMOUNT</c> or
+    /// <c>IDEMPOTENCY_KEY_REUSED</c>; 400 for a field the gateway refused (the field errors are in
+    /// RawResult).
+    /// </exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry with the same key.</exception>
+    public async Task<Agreement> CreateAgreementAsync(
+        CreateAgreementRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
+        var body = SerializeWithExtra(request, request.Extra);
+        var data = await this.CreateAsync(AgreementsPath, body, idempotencyKey, "agreement", cancellationToken)
+            .ConfigureAwait(false);
+        return ToAgreement(data);
+    }
+
+    /// <summary>Reads one agreement: its status, its next charge and why it is past due.</summary>
+    /// <param name="agreementId">The <see cref="Agreement.Id"/>.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The agreement as it is now.</returns>
+    /// <exception cref="DominaiteValidationException">The id is not one path segment; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 404 <c>AGREEMENT_NOT_FOUND</c> for an id that is not one of your agreements, or 400 for an id that is not an agreement id.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<Agreement> GetAgreementAsync(
+        string agreementId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(agreementId);
+
+        var path = $"{AgreementsPath}/{NormalizeHandle(agreementId, "agreementId must be the Agreement.Id from CreateAgreementAsync")}";
+        var reply = await this.SendAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        return ToAgreement(reply.ReadObject("agreement"));
+    }
+
+    /// <summary>Cancels an agreement: the platform charges it no more.</summary>
+    /// <remarks>
+    /// Resolves on HTTP 204, and again on an agreement that is already cancelled, so a retry is
+    /// safe. An agreement that completed or failed cannot be cancelled:
+    /// <c>AGREEMENT_ENDED</c>.
+    /// </remarks>
+    /// <param name="agreementId">The <see cref="Agreement.Id"/>.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>A task that completes once the agreement is cancelled.</returns>
+    /// <exception cref="DominaiteValidationException">The id is not one path segment; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 404 <c>AGREEMENT_NOT_FOUND</c>, or 409 <c>AGREEMENT_ENDED</c> for an agreement that completed or failed.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task CancelAgreementAsync(
+        string agreementId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(agreementId);
+
+        var path = $"{AgreementsPath}/{NormalizeHandle(agreementId, "agreementId must be the Agreement.Id from CreateAgreementAsync")}";
+        var reply = await this.SendAsync(HttpMethod.Delete, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        reply.ReadNothing();
+    }
+
+    /// <summary>
+    /// Registers a webhook endpoint: a URL that receives the events you name. Needs an API key
+    /// with the <c>webhooks:manage</c> scope.
+    /// </summary>
+    /// <remarks>
+    /// Store <see cref="WebhookEndpoint.Secret"/> from this answer: no other answer has it. A
+    /// retry with the same key returns the same endpoint without the secret. If you lost the
+    /// secret, delete the endpoint and register it again with a new key. On
+    /// <c>WEBHOOK_ALREADY_REGISTERED</c> the key was used for an endpoint that still exists, and
+    /// its id is in <c>error.params.webhookId</c> of
+    /// <see cref="DominaiteApiException.RawResult"/>.
+    /// </remarks>
+    /// <param name="request">
+    /// The endpoint. <see cref="CreateWebhookEndpointRequest.IdempotencyKey"/> is required.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The endpoint with its signing secret.</returns>
+    /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>webhooks:manage</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
+    /// <exception cref="DominaiteApiException">
+    /// The gateway refused the endpoint; inspect Code. HTTP 400 <c>WEBHOOK_URL_REJECTED</c>, or
+    /// <c>VALIDATION_ERROR</c> for another field (the field errors are in RawResult); 409
+    /// <c>WEBHOOK_LIMIT_REACHED</c>, <c>WEBHOOK_ALREADY_REGISTERED</c>, or
+    /// <c>DUPLICATE_REQUEST</c> while the first call with this key still runs (retry shortly with
+    /// the same key); 422 <c>IDEMPOTENCY_KEY_REUSED</c>.
+    /// </exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry with the same key.</exception>
+    public async Task<WebhookEndpoint> CreateWebhookEndpointAsync(
+        CreateWebhookEndpointRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
+        var body = SerializeWithExtra(request, request.Extra);
+        var data = await this.CreateAsync(WebhooksPath, body, idempotencyKey, "webhook endpoint", cancellationToken)
+            .ConfigureAwait(false);
+        return ToWebhookEndpoint(data);
+    }
+
+    /// <summary>
+    /// Lists your webhook endpoints, active and inactive, newest first. Needs an API key with the
+    /// <c>webhooks:manage</c> scope.
+    /// </summary>
+    /// <remarks>The list has no pages, and it never has the signing secrets.</remarks>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The endpoints. Empty when you have none.</returns>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>webhooks:manage</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">An unexpected response.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<IReadOnlyList<WebhookEndpoint>> ListWebhookEndpointsAsync(CancellationToken cancellationToken = default)
+    {
+        var reply = await this.SendAsync(HttpMethod.Get, WebhooksPath, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        return [.. reply.ReadArray("webhook endpoint list").EnumerateArray().Select(ToWebhookEndpoint)];
+    }
+
+    /// <summary>
+    /// Removes a webhook endpoint: it receives no more deliveries. Needs an API key with the
+    /// <c>webhooks:manage</c> scope.
+    /// </summary>
+    /// <remarks>
+    /// A retry after a lost answer gets <c>WEBHOOK_NOT_FOUND</c> (HTTP 404): the endpoint is
+    /// already gone.
+    /// </remarks>
+    /// <param name="webhookId">The <see cref="WebhookEndpoint.Id"/>.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>A task that completes once the endpoint is removed.</returns>
+    /// <exception cref="DominaiteValidationException">The id is not a UUID; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>webhooks:manage</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 404 <c>WEBHOOK_NOT_FOUND</c> for an id that is not one of your endpoints.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task DeleteWebhookEndpointAsync(
+        string webhookId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(webhookId);
+
+        var path = $"{WebhooksPath}/{NormalizeWebhookId(webhookId)}";
+        var reply = await this.SendAsync(HttpMethod.Delete, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        reply.ReadNothing();
+    }
+
+    /// <summary>
+    /// Lists your online payments created in a time window, oldest first, one page at a time.
+    /// Needs an API key with the <c>transactions:read</c> scope.
+    /// </summary>
+    /// <remarks>
+    /// To read every page, call again with <see cref="ListTransactionsRequest.Cursor"/> set to the
+    /// <see cref="TransactionPage.NextCursor"/> of the last page, until it is null. Keep
+    /// <see cref="ListTransactionsRequest.From"/>, <see cref="ListTransactionsRequest.To"/> and
+    /// <see cref="ListTransactionsRequest.Status"/> the same for every page. The parameters travel
+    /// in the URL query; the signature covers the path without it.
+    /// </remarks>
+    /// <param name="request">The window, and optionally a status, a page size and a cursor.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>One page of payments.</returns>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>transactions:read</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 400 for a parameter the gateway refused, for example a window longer than 31 days or a changed cursor (the field errors are in RawResult).</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<TransactionPage> ListTransactionsAsync(
+        ListTransactionsRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        // GET signs the bare path with an EMPTY idempotency key and an EMPTY body. The query is
+        // in the URL only.
+        var reply = await this.SendRequestAsync(
+                HttpMethod.Get,
+                TransactionsPath,
+                TransactionQuery(request),
+                string.Empty,
+                string.Empty,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var data = reply.ReadObject("transaction page");
+        var page = Deserialize<TransactionPage>(data, "transaction page");
+        page.Raw = data;
+        if (data.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+        {
+            page.Items = [.. items.EnumerateArray().Select(item =>
+            {
+                var row = Deserialize<TransactionItem>(item, "transaction");
+                row.Raw = item;
+                return row;
+            })];
+        }
+
+        return page;
     }
 
     /// <summary>Releases the HttpClient this instance created for itself.</summary>
@@ -612,18 +1085,55 @@ public sealed class DominaiteClient : IDisposable
     }
 
     /// <summary>
+    /// Sends a create call with its idempotency key and returns the <c>data</c> object. Every error
+    /// carries the key, so the caller can retry with it.
+    /// </summary>
+    private async Task<JsonElement> CreateAsync(
+        string path,
+        string body,
+        string idempotencyKey,
+        string what,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var reply = await this.SendAsync(HttpMethod.Post, path, body, idempotencyKey, cancellationToken)
+                .ConfigureAwait(false);
+            return reply.ReadObject(what);
+        }
+        catch (DominaiteException error)
+        {
+            error.IdempotencyKey = idempotencyKey;
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Signs and sends one call, and parses whatever came back into an <see cref="ApiReply"/>.
     /// </summary>
     /// <remarks>
-    /// Only what no route can use is thrown here: transport failures, a redirect, a 401/403, and
-    /// a body that is not a JSON object (a 5xx of that kind is a retryable transport failure;
-    /// anything else is an API error). Every other status comes back as a reply, so the payment
+    /// Only what no route can use is thrown here: transport failures, a redirect, a 401/403, a
+    /// 429 with its <c>Retry-After</c>, and a body that is not a JSON object (a 5xx of that kind
+    /// is a retryable transport failure; anything else is an API error). Every other status comes back as a reply, so the payment
     /// method routes can read a 402 decline or a coded 502 as the typed answers they are, while
     /// <see cref="RequestAsync"/> rejects them generically.
     /// </remarks>
-    private async Task<ApiReply> SendAsync(
+    private Task<ApiReply> SendAsync(
         HttpMethod method,
         string path,
+        string body,
+        string idempotencyKey,
+        CancellationToken cancellationToken)
+        => this.SendRequestAsync(method, path, string.Empty, body, idempotencyKey, cancellationToken);
+
+    /// <summary>
+    /// What <see cref="SendAsync"/> does, with a query string. The query goes into the URL only:
+    /// the signed path never has one.
+    /// </summary>
+    private async Task<ApiReply> SendRequestAsync(
+        HttpMethod method,
+        string path,
+        string query,
         string body,
         string idempotencyKey,
         CancellationToken cancellationToken)
@@ -642,7 +1152,9 @@ public sealed class DominaiteClient : IDisposable
             Body = body,
         });
 
-        using var message = new HttpRequestMessage(method, this.BaseUrl + path);
+        using var message = new HttpRequestMessage(
+            method,
+            query.Length > 0 ? $"{this.BaseUrl}{path}?{query}" : this.BaseUrl + path);
 
         // Some edges block requests without a real User-Agent, so always send one.
         message.Headers.TryAddWithoutValidation("User-Agent", this.UserAgent);
@@ -719,9 +1231,17 @@ public sealed class DominaiteClient : IDisposable
                     innerException: error);
             }
 
+            // A 429 means the same thing whoever sent it, the API or an edge in front of it, so a
+            // body that is not the envelope does not make it a different error.
+            if (status == (int)HttpStatusCode.TooManyRequests)
+            {
+                var retryAfter = ReadRetryAfter(response.Headers.RetryAfter);
+                throw new ApiReply(status, TryParseObject(raw) ?? EmptyPayload, retryAfter).Rejection();
+            }
+
             var reply = new ApiReply(status, ParseEnvelope(status, raw));
 
-            // Credentials are refused the same way on every route.
+            // Credentials and permissions are refused the same way on every route.
             if (status is 401 or 403)
             {
                 throw reply.Rejection();
@@ -742,23 +1262,7 @@ public sealed class DominaiteClient : IDisposable
     /// </remarks>
     private static JsonElement ParseEnvelope(int httpStatus, string raw)
     {
-        JsonElement envelope = default;
-        var isObject = false;
-        try
-        {
-            using var document = JsonDocument.Parse(raw);
-            if (document.RootElement.ValueKind == JsonValueKind.Object)
-            {
-                envelope = document.RootElement.Clone();
-                isObject = true;
-            }
-        }
-        catch (JsonException)
-        {
-            // Classified below on the status, like a body of the wrong kind.
-        }
-
-        if (isObject)
+        if (TryParseObject(raw) is { } envelope)
         {
             return envelope;
         }
@@ -773,13 +1277,38 @@ public sealed class DominaiteClient : IDisposable
         throw new DominaiteApiException(httpStatus, null, "The Dominaite API returned a non-JSON response.");
     }
 
+    /// <summary>The body as a JSON object, or null when it is not one (not JSON, or another kind).</summary>
+    private static JsonElement? TryParseObject(string raw)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(raw);
+            return document.RootElement.ValueKind == JsonValueKind.Object ? document.RootElement.Clone() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>
-    /// The statuses that stay generic on every route: input validation, credentials, an id that
-    /// is not yours, and rate limiting. A coded answer outside this set is the gateway describing
-    /// a payment method outcome, which the charge and revoke routes surface as
-    /// <see cref="DominaiteChargeException"/> and <see cref="DominaiteRevokeException"/>.
+    /// The wait a <c>Retry-After</c> header asks for: seconds, or a date. Null when there is no
+    /// such header or it cannot be read. A date in the past is no wait at all.
     /// </summary>
-    private static bool IsGenericFailureStatus(int status) => status is 400 or 401 or 403 or 404 or 429;
+    private static TimeSpan? ReadRetryAfter(RetryConditionHeaderValue? header)
+    {
+        var wait = header?.Delta ?? (header?.Date is { } date ? (TimeSpan?)(date - DateTimeOffset.UtcNow) : null);
+        return wait < TimeSpan.Zero ? TimeSpan.Zero : wait;
+    }
+
+    /// <summary>
+    /// The statuses that stay generic on every route: input validation and an id that is not
+    /// yours. A coded answer outside this set is the gateway describing a payment method outcome,
+    /// which the charge and revoke routes surface as <see cref="DominaiteChargeException"/> and
+    /// <see cref="DominaiteRevokeException"/>. Credentials (401), permissions (403) and limits (429)
+    /// never get here: <see cref="SendAsync"/> throws them first.
+    /// </summary>
+    private static bool IsGenericFailureStatus(int status) => status is 400 or 404;
 
     /// <summary>
     /// One parsed gateway answer: the HTTP status and the envelope as sent.
@@ -794,13 +1323,17 @@ public sealed class DominaiteClient : IDisposable
     /// </remarks>
     private readonly struct ApiReply
     {
-        public ApiReply(int status, JsonElement envelope)
+        public ApiReply(int status, JsonElement envelope, TimeSpan? retryAfter = null)
         {
             this.Status = status;
             this.Envelope = envelope;
+            this.RetryAfter = retryAfter;
         }
 
         public int Status { get; }
+
+        /// <summary>The wait from the <c>Retry-After</c> header; read on a 429 only.</summary>
+        public TimeSpan? RetryAfter { get; }
 
         /// <summary>The whole body: <c>{ success, data?, error?, metadata }</c>.</summary>
         public JsonElement Envelope { get; }
@@ -834,6 +1367,48 @@ public sealed class DominaiteClient : IDisposable
                 ?? StringField(this.Payload, "errorMessage");
 
         /// <summary>
+        /// The <c>data</c> object on a success, or the generic rejection for a 4xx or 5xx.
+        /// </summary>
+        public JsonElement ReadObject(string what)
+        {
+            if (this.Status >= 400)
+            {
+                throw this.Rejection();
+            }
+
+            return this.Data
+                ?? throw new DominaiteApiException(this.Status, null, $"The Dominaite API answered without a {what} body.", this.Envelope);
+        }
+
+        /// <summary>
+        /// The <c>data</c> array on a success (the list routes that have no pages), or the generic
+        /// rejection for a 4xx or 5xx.
+        /// </summary>
+        public JsonElement ReadArray(string what)
+        {
+            if (this.Status >= 400)
+            {
+                throw this.Rejection();
+            }
+
+            if (!this.Envelope.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+            {
+                throw new DominaiteApiException(this.Status, null, $"The Dominaite API answered without a {what} body.", this.Envelope);
+            }
+
+            return data;
+        }
+
+        /// <summary>Nothing on a success (a 204), or the generic rejection for a 4xx or 5xx.</summary>
+        public void ReadNothing()
+        {
+            if (this.Status >= 400)
+            {
+                throw this.Rejection();
+            }
+        }
+
+        /// <summary>
         /// The charge row in <c>data</c>, on a 201, a 402 and the coded 502s that attach one. Null
         /// when <c>data</c> is missing or carries no charge id.
         /// </summary>
@@ -851,15 +1426,15 @@ public sealed class DominaiteClient : IDisposable
 
         /// <summary>
         /// The refund in <c>data</c> on a success, or the error the answer stands for: a
-        /// <see cref="DominaiteRefundException"/> for a coded 4xx other than credentials and rate
-        /// limiting, the generic rejection for everything else.
+        /// <see cref="DominaiteRefundException"/> for a coded 4xx, the generic rejection for
+        /// everything else. Credentials, permissions and limits never get here.
         /// </summary>
         public Refund ReadRefund()
         {
             if (this.Status >= 400)
             {
                 var code = this.ErrorCode;
-                if (this.Status < 500 && code is not null && this.Status is not (401 or 403 or 429))
+                if (this.Status < 500 && code is not null)
                 {
                     throw new DominaiteRefundException(
                         this.Status,
@@ -879,6 +1454,45 @@ public sealed class DominaiteClient : IDisposable
             var refund = Deserialize<Refund>(data, "refund");
             refund.Raw = data;
             return refund;
+        }
+
+        /// <summary>
+        /// The refund list in <c>data</c> on a success, each refund with its own Raw, or the error
+        /// the answer stands for, mapped like <see cref="ReadRefund"/>.
+        /// </summary>
+        public RefundList ReadRefundList()
+        {
+            if (this.Status >= 400)
+            {
+                var code = this.ErrorCode;
+                if (this.Status < 500 && code is not null)
+                {
+                    throw new DominaiteRefundException(
+                        this.Status,
+                        code,
+                        this.ErrorMessage ?? "The refund list was refused.",
+                        this.Envelope);
+                }
+
+                throw this.Rejection();
+            }
+
+            if (this.Data is not { } data
+                || !data.TryGetProperty("refunds", out var refunds)
+                || refunds.ValueKind != JsonValueKind.Array)
+            {
+                throw new DominaiteApiException(this.Status, null, "The Dominaite API answered the refund list without a refund list body.");
+            }
+
+            var list = Deserialize<RefundList>(data, "refund list");
+            list.Raw = data;
+            list.Refunds = [.. refunds.EnumerateArray().Select(item =>
+            {
+                var refund = Deserialize<Refund>(item, "refund");
+                refund.Raw = item;
+                return refund;
+            })];
+            return list;
         }
 
         /// <summary>
@@ -902,9 +1516,10 @@ public sealed class DominaiteClient : IDisposable
         }
 
         /// <summary>
-        /// The generic error for a 4xx or 5xx: a 5xx is a retryable transport failure, a 401/403
-        /// an auth failure, and any other 4xx a <see cref="DominaiteApiException"/> that keeps the
-        /// code (IDEMPOTENCY_KEY_REQUIRED on a 400 is the whole point of the rejection).
+        /// The generic error for a 4xx or 5xx: a 5xx is a retryable transport failure, a 401 an
+        /// auth failure, a 403 a permission failure, a 429 a rate limit, and any other 4xx a
+        /// <see cref="DominaiteApiException"/> that keeps the code (IDEMPOTENCY_KEY_REQUIRED on a
+        /// 400 is the whole point of the rejection).
         /// </summary>
         public DominaiteException Rejection()
         {
@@ -918,15 +1533,41 @@ public sealed class DominaiteClient : IDisposable
 
             var code = this.ErrorCode;
             var message = this.ErrorMessage;
-            if (this.Status is 401 or 403)
+            switch (this.Status)
             {
-                return new DominaiteAuthException(
-                    code ?? "UNAUTHORIZED",
-                    message ?? "Authentication failed - check your key id, secret, and server clock.",
-                    this.Status);
+                case 401:
+                    return new DominaiteAuthException(
+                        code ?? "UNAUTHORIZED",
+                        message ?? "Authentication failed - check your key id, secret, and server clock.",
+                        this.Status);
+                case 403:
+                    return Forbidden(code, message);
+                case 429:
+                    return new DominaiteRateLimitException(
+                        code,
+                        message ?? "Too many requests (HTTP 429). Wait, then retry with the same idempotency key.",
+                        this.RetryAfter);
+                default:
+                    return new DominaiteApiException(this.Status, code, message ?? "Request rejected", this.Envelope);
             }
+        }
 
-            return new DominaiteApiException(this.Status, code, message ?? "Request rejected");
+        /// <summary>
+        /// A 403 with a message of its own per code. The credentials were good, so the 401 hint
+        /// about the key id, the secret and the clock would send the caller the wrong way.
+        /// </summary>
+        private static DominaitePermissionException Forbidden(string? code, string? message)
+        {
+            var text = code switch
+            {
+                PermissionErrorCodes.InsufficientScope =>
+                    $"{(message ?? "This API key does not have the scope this route requires").TrimEnd('.')}. Use an API key that has this scope.",
+                PermissionErrorCodes.VerifyOnlyNotEnabled =>
+                    "Verify-only sessions are not enabled for this account. We switch it on for your account. Contact Dominaite support to ask for it.",
+                _ => message ?? "This API key is not allowed to make this call (HTTP 403).",
+            };
+
+            return new DominaitePermissionException(code ?? "FORBIDDEN", text);
         }
     }
 
@@ -937,28 +1578,19 @@ public sealed class DominaiteClient : IDisposable
     /// </summary>
     private static string SerializeBody(CheckoutSessionRequest request)
     {
-        ValidateMoneyParams(request.Amount, request.Currency, request.OrderReference);
-
-        var node = JsonSerializer.SerializeToNode(request, JsonOptions)!.AsObject();
-        foreach (var extra in request.Extra)
-        {
-            if (!node.ContainsKey(extra.Key))
-            {
-                node[extra.Key] = JsonSerializer.SerializeToNode(extra.Value, JsonOptions);
-            }
-        }
-
-        return node.ToJsonString(JsonOptions);
+        ValidateMoneyParams(request.Amount, request.Currency, request.OrderReference, request.VerifyOnly == true);
+        return SerializeWithExtra(request, request.Extra);
     }
 
     /// <summary>
     /// Validates a charge and returns the exact body bytes that get both signed and sent, in
-    /// contract order: amount, currency, orderReference, then description when there is one.
+    /// contract order: amount, currency, orderReference, then description and agreementId when
+    /// set, then the extra fields.
     /// </summary>
     private static string SerializeBody(ChargeRequest request)
     {
         ValidateMoneyParams(request.Amount, request.Currency, request.OrderReference);
-        return JsonSerializer.Serialize(request, JsonOptions);
+        return SerializeWithExtra(request, request.Extra);
     }
 
     /// <summary>
@@ -973,12 +1605,44 @@ public sealed class DominaiteClient : IDisposable
                 "Amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR), or null to refund everything still refundable");
         }
 
-        return JsonSerializer.Serialize(request, JsonOptions);
+        return SerializeWithExtra(request, request.Extra);
     }
 
-    private static void ValidateMoneyParams(long amount, string? currency, string? orderReference)
+    /// <summary>
+    /// The modelled properties in declaration order, nulls omitted, then each extra field whose
+    /// key is not already in the body. Serialized once, so these are the bytes that get both
+    /// signed and sent.
+    /// </summary>
+    private static string SerializeWithExtra<T>(T request, IDictionary<string, object?> extra)
     {
-        if (amount <= 0)
+        var node = JsonSerializer.SerializeToNode(request, JsonOptions)!.AsObject();
+        foreach (var field in extra)
+        {
+            if (!node.ContainsKey(field.Key))
+            {
+                node[field.Key] = JsonSerializer.SerializeToNode(field.Value, JsonOptions);
+            }
+        }
+
+        return node.ToJsonString(JsonOptions);
+    }
+
+    /// <summary>
+    /// The money checks every create call makes before anything is sent. A verify-only session
+    /// saves a card without a payment, so its amount of 0 is by design: there the SDK leaves the
+    /// amount to the gateway.
+    /// </summary>
+    private static void ValidateMoneyParams(long amount, string? currency, string? orderReference, bool verifyOnly = false)
+    {
+        // The gateway refuses a verify-only session with any amount but 0: the platform sets the
+        // verification amount.
+        if (verifyOnly && amount != 0)
+        {
+            throw new DominaiteValidationException(
+                "Leave Amount at 0 with VerifyOnly: the platform sets the verification amount");
+        }
+
+        if (amount <= 0 && !verifyOnly)
         {
             throw new DominaiteValidationException(
                 "Amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR)");
@@ -1039,6 +1703,107 @@ public sealed class DominaiteClient : IDisposable
         return trimmed;
     }
 
+    /// <summary>
+    /// A plan or agreement id exactly as given, trimmed, or a validation error. The gateway signs
+    /// these ids as the path carries them.
+    /// </summary>
+    private static string NormalizeHandle(string id, string what)
+    {
+        var trimmed = id.Trim();
+        if (!IdSegmentPattern.IsMatch(trimmed))
+        {
+            throw new DominaiteValidationException($"{what} (letters, digits, _ or -, at most 100 characters)");
+        }
+
+        return trimmed;
+    }
+
+    /// <summary>
+    /// A webhook endpoint id in the lowercase hyphenated form the gateway signs, or a validation
+    /// error.
+    /// </summary>
+    private static string NormalizeWebhookId(string webhookId)
+    {
+        var normalized = webhookId.Trim().ToLowerInvariant();
+        if (!Guid.TryParseExact(normalized, "D", out _))
+        {
+            throw new DominaiteValidationException(
+                "webhookId must be the WebhookEndpoint.Id from CreateWebhookEndpointAsync or ListWebhookEndpointsAsync");
+        }
+
+        return normalized;
+    }
+
+    private static WebhookEndpoint ToWebhookEndpoint(JsonElement data)
+    {
+        var endpoint = Deserialize<WebhookEndpoint>(data, "webhook endpoint");
+        endpoint.Raw = data;
+        return endpoint;
+    }
+
+    /// <summary>
+    /// The query of a transaction list call: the modelled parameters, then the extra ones, each
+    /// name and value percent-encoded. The window is written in UTC with a <c>Z</c>, with a
+    /// fraction only when the value has one.
+    /// </summary>
+    private static string TransactionQuery(ListTransactionsRequest request)
+    {
+        var parameters = new List<KeyValuePair<string, string>>
+        {
+            new("from", QueryInstant(request.From)),
+            new("to", QueryInstant(request.To)),
+        };
+        if (request.Status is not null)
+        {
+            parameters.Add(new("status", request.Status));
+        }
+
+        if (request.Limit is { } limit)
+        {
+            parameters.Add(new("limit", limit.ToString(CultureInfo.InvariantCulture)));
+        }
+
+        if (request.Cursor is not null)
+        {
+            parameters.Add(new("cursor", request.Cursor));
+        }
+
+        foreach (var field in request.Extra)
+        {
+            if (!parameters.Exists(parameter => string.Equals(parameter.Key, field.Key, StringComparison.Ordinal)))
+            {
+                parameters.Add(field);
+            }
+        }
+
+        return string.Join(
+            "&",
+            parameters.Select(parameter => $"{Uri.EscapeDataString(parameter.Key)}={Uri.EscapeDataString(parameter.Value)}"));
+    }
+
+    private static string QueryInstant(DateTimeOffset value)
+    {
+        var utc = value.UtcDateTime;
+        var format = utc.Ticks % TimeSpan.TicksPerSecond == 0
+            ? "yyyy-MM-dd'T'HH:mm:ss'Z'"
+            : "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'";
+        return utc.ToString(format, CultureInfo.InvariantCulture);
+    }
+
+    private static Plan ToPlan(JsonElement data)
+    {
+        var plan = Deserialize<Plan>(data, "plan");
+        plan.Raw = data;
+        return plan;
+    }
+
+    private static Agreement ToAgreement(JsonElement data)
+    {
+        var agreement = Deserialize<Agreement>(data, "agreement");
+        agreement.Raw = data;
+        return agreement;
+    }
+
     private static T Deserialize<T>(JsonElement payload, string what)
     {
         try
@@ -1074,5 +1839,19 @@ public sealed class DominaiteClient : IDisposable
 
         var text = property.GetString();
         return string.IsNullOrEmpty(text) ? null : text;
+    }
+
+    /// <summary>
+    /// Writes a date in a request body as UTC with a <c>Z</c>, whatever offset the value carries,
+    /// so the gateway reads the same instant whatever its own time zone is. Reading is the
+    /// default.
+    /// </summary>
+    private sealed class UtcDateConverter : JsonConverter<DateTimeOffset>
+    {
+        public override DateTimeOffset Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+            => reader.GetDateTimeOffset();
+
+        public override void Write(Utf8JsonWriter writer, DateTimeOffset value, JsonSerializerOptions options)
+            => writer.WriteStringValue(value.UtcDateTime);
     }
 }

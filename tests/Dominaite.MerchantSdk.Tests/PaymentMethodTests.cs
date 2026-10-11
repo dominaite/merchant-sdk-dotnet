@@ -671,4 +671,70 @@ public class PaymentMethodTests
         Assert.Null(charge.DeclineCode);
         Assert.True(charge.IsPaid);
     }
+
+    /// <summary>
+    /// The agreement id and the extra fields go into the one body that is signed. An extra key
+    /// that collides with a modelled field never replaces it.
+    /// </summary>
+    [Fact]
+    public async Task AnAgreementIdAndExtraFieldsAreSentInTheSignedBody()
+    {
+        using var server = new MockServer(ChargeCreated());
+        using var client = ClientFor(server);
+
+        var request = Charge();
+        request.Description = "Seat top-up";
+        request.AgreementId = "agr_0123456789abcdef0123456789abcdef";
+        request.Extra["futureField"] = "x";
+        request.Extra["amount"] = 1;
+
+        await client.ChargePaymentMethodAsync(PaymentMethodId, request);
+
+        var sent = server.LastRequest;
+        Assert.Equal(
+            """{"amount":2500,"currency":"EUR","orderReference":"order-1043","description":"Seat top-up","agreementId":"agr_0123456789abcdef0123456789abcdef","futureField":"x"}""",
+            sent.Body);
+        Assert.Equal(ChargeKey, sent.Header("Idempotency-Key"));
+        AssertSignatureMatches(sent, ChargePath, ChargeKey);
+    }
+
+    [Fact]
+    public async Task AChargeUnderAnAgreementReadsTheAgreementAndTheSequence()
+    {
+        using var server = new MockServer(ChargeEnvelope(
+            201,
+            data: """{"chargeId":"ch_33333333333343338333333333333333","status":"succeeded","declineClass":null,"declineCode":null,"transactionId":"33333333-3333-4333-8333-333333333333","agreementId":"agr_0123456789abcdef0123456789abcdef","sequence":4}"""));
+        using var client = ClientFor(server);
+
+        var charge = await client.ChargePaymentMethodAsync(PaymentMethodId, Charge());
+
+        Assert.Equal("agr_0123456789abcdef0123456789abcdef", charge.AgreementId);
+        Assert.Equal(4, charge.Sequence);
+        Assert.True(charge.IsPaid);
+    }
+
+    /// <summary>
+    /// <c>declineClass</c> can be null on a 402 decline. The answer is still the charge, never an
+    /// exception.
+    /// </summary>
+    [Fact]
+    public async Task A402DeclineWithoutADeclineClassIsStillAResult()
+    {
+        using var server = new MockServer(ChargeEnvelope(
+            402,
+            "CHARGE_DECLINED",
+            "The payment provider declined the charge.",
+            """{"chargeId":"ch_33333333333343338333333333333335","status":"failed","declineClass":null,"declineCode":"05","transactionId":"33333333-3333-4333-8333-333333333335","agreementId":null,"sequence":2}"""));
+        using var client = ClientFor(server);
+
+        var charge = await client.ChargePaymentMethodAsync(PaymentMethodId, Charge());
+
+        Assert.Equal(ChargeStatuses.Failed, charge.Status);
+        Assert.False(charge.IsPaid);
+        Assert.True(charge.IsTerminal);
+        Assert.Null(charge.DeclineClass);
+        Assert.Equal("05", charge.DeclineCode);
+        Assert.Null(charge.AgreementId);
+        Assert.Equal(2, charge.Sequence);
+    }
 }

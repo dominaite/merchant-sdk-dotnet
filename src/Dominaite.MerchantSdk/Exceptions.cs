@@ -108,9 +108,13 @@ public sealed class DominaiteRefusalException : DominaiteException
 }
 
 /// <summary>
-/// The API rejected your credentials or signature (HTTP 401/403). Not retryable: fix the key id,
+/// The API rejected your credentials or signature (HTTP 401). Not retryable: fix the key id,
 /// the secret, the server clock, or the caller allowlist.
 /// </summary>
+/// <remarks>
+/// A 403 is not this exception. A 403 means the credentials were good but the call is not
+/// allowed: that is <see cref="DominaitePermissionException"/>.
+/// </remarks>
 public sealed class DominaiteAuthException : DominaiteException
 {
     /// <summary>Initializes a new instance of the <see cref="DominaiteAuthException"/> class.</summary>
@@ -126,11 +130,117 @@ public sealed class DominaiteAuthException : DominaiteException
 }
 
 /// <summary>
+/// The HTTP 403 codes. The key and the signature were good, but this call is not allowed.
+/// </summary>
+public static class PermissionErrorCodes
+{
+    /// <summary>
+    /// HTTP 403: the API key does not have the scope this route needs. The message names the
+    /// scope. Use a key that has it; retrying with the same key will not help.
+    /// </summary>
+    public const string InsufficientScope = "INSUFFICIENT_SCOPE";
+
+    /// <summary>
+    /// HTTP 403 on session create: verify-only sessions are not on for your account. Nothing was
+    /// created and the idempotency key is not used up.
+    /// </summary>
+    public const string VerifyOnlyNotEnabled = "VERIFY_ONLY_NOT_ENABLED";
+
+    /// <summary>Every 403 code above.</summary>
+    public static IReadOnlyList<string> All { get; } = [InsufficientScope, VerifyOnlyNotEnabled];
+}
+
+/// <summary>
+/// The key and the signature were good, but this call is not allowed (HTTP 403). Not retryable:
+/// the same call with the same key gets the same answer.
+/// </summary>
+/// <remarks>
+/// <see cref="DominaiteException.Code"/> is one of <see cref="PermissionErrorCodes"/>.
+/// <c>INSUFFICIENT_SCOPE</c>: use an API key that has the scope the message names.
+/// <c>VERIFY_ONLY_NOT_ENABLED</c>: verify-only sessions are off for your account. We switch it on
+/// for your account; ask Dominaite support.
+/// </remarks>
+public sealed class DominaitePermissionException : DominaiteException
+{
+    /// <summary>Initializes a new instance of the <see cref="DominaitePermissionException"/> class.</summary>
+    /// <param name="code">The 403 code, usually one of <see cref="PermissionErrorCodes"/>.</param>
+    /// <param name="message">What is not allowed and what to do.</param>
+    public DominaitePermissionException(string code, string message)
+        : base(message)
+    {
+        this.Code = code;
+        this.HttpStatus = 403;
+    }
+}
+
+/// <summary>
+/// The HTTP 429 codes. Each one means a limit refused the call and nothing was done.
+/// </summary>
+public static class RateLimitErrorCodes
+{
+    /// <summary>Too many requests with this API key. Wait, then send the call again.</summary>
+    public const string RateLimitExceeded = "RATE_LIMIT_EXCEEDED";
+
+    /// <summary>
+    /// A stored-card charge would go past a volume limit: the charges allowed on one payment
+    /// method in 24 hours, or the amount allowed per hour in one currency. Nothing was charged.
+    /// </summary>
+    public const string ChargeVelocityExceeded = "CHARGE_VELOCITY_EXCEEDED";
+
+    /// <summary>
+    /// This API key collected too many declined charges in a short time, so its charge route is
+    /// locked for a while. Nothing was charged.
+    /// </summary>
+    public const string ChargeDeclineRateExceeded = "CHARGE_DECLINE_RATE_EXCEEDED";
+
+    /// <summary>Every 429 code above.</summary>
+    public static IReadOnlyList<string> All { get; } = [RateLimitExceeded, ChargeVelocityExceeded, ChargeDeclineRateExceeded];
+}
+
+/// <summary>
+/// A limit refused the call (HTTP 429). Nothing was done. Wait <see cref="RetryAfter"/>, then
+/// send the call again with the SAME idempotency key.
+/// </summary>
+/// <remarks>
+/// <see cref="DominaiteException.Code"/> says which limit (<see cref="RateLimitErrorCodes"/>), and
+/// is null when the 429 did not come from the API itself. <see cref="DominaiteException.IsRetryable"/>
+/// is false and <see cref="DominaiteClient.CreateCheckoutSessionWithRetryAsync"/> does not retry
+/// it: a retry before the wait is over meets the same limit.
+/// </remarks>
+public sealed class DominaiteRateLimitException : DominaiteException
+{
+    /// <summary>Initializes a new instance of the <see cref="DominaiteRateLimitException"/> class.</summary>
+    /// <param name="code">The 429 code, when the API sent one.</param>
+    /// <param name="message">Which limit, and what to do.</param>
+    /// <param name="retryAfter">The wait the API asked for in its <c>Retry-After</c> header, when it sent one.</param>
+    public DominaiteRateLimitException(string? code, string message, TimeSpan? retryAfter)
+        : base(message)
+    {
+        this.Code = code;
+        this.HttpStatus = 429;
+        this.RetryAfter = retryAfter;
+    }
+
+    /// <summary>
+    /// How long to wait before the next attempt, from the <c>Retry-After</c> header. Null when the
+    /// API sent no such header: then wait at least a few seconds, and longer on each new 429.
+    /// </summary>
+    public TimeSpan? RetryAfter { get; }
+
+    /// <inheritdoc />
+    public override bool IsRetryable => false;
+}
+
+/// <summary>
 /// The API answered, but with a rejecting or unexpected response. A 400 carries a validation
 /// code such as <c>IDEMPOTENCY_KEY_REQUIRED</c>; a 404 from <see cref="DominaiteClient.GetStatusAsync"/>
 /// means an unknown transaction id, and from the payment method routes an id that is not yours
 /// (<c>PAYMENT_METHOD_NOT_FOUND</c> on a charge, <c>VALIDATION_ERROR</c> on a revoke).
 /// </summary>
+/// <remarks>
+/// <see cref="RawResult"/> keeps the answer's envelope. Read the details there that
+/// <see cref="DominaiteException.Code"/> does not carry, for example the field errors of a 400.
+/// </remarks>
 public sealed class DominaiteApiException : DominaiteException
 {
     /// <summary>Initializes a new instance of the <see cref="DominaiteApiException"/> class.</summary>
@@ -138,11 +248,29 @@ public sealed class DominaiteApiException : DominaiteException
     /// <param name="code">The machine-readable reason when the API sent one, otherwise null.</param>
     /// <param name="message">The human-readable reason.</param>
     public DominaiteApiException(int httpStatus, string? code, string message)
+        : this(httpStatus, code, message, default)
+    {
+    }
+
+    /// <summary>Initializes a new instance of the <see cref="DominaiteApiException"/> class.</summary>
+    /// <param name="httpStatus">The HTTP status code.</param>
+    /// <param name="code">The machine-readable reason when the API sent one, otherwise null.</param>
+    /// <param name="message">The human-readable reason.</param>
+    /// <param name="rawResult">The whole envelope, as received.</param>
+    public DominaiteApiException(int httpStatus, string? code, string message, JsonElement rawResult)
         : base(message)
     {
         this.HttpStatus = httpStatus;
         this.Code = code;
+        this.RawResult = rawResult;
     }
+
+    /// <summary>
+    /// The whole envelope exactly as received, for fields the typed surface does not model. Its
+    /// <see cref="JsonElement.ValueKind"/> is <see cref="JsonValueKind.Undefined"/> when the answer
+    /// had no envelope.
+    /// </summary>
+    public JsonElement RawResult { get; }
 }
 
 /// <summary>
@@ -406,10 +534,11 @@ public sealed class DominaiteRevokeException : DominaiteException
 }
 
 /// <summary>
-/// The codes <see cref="DominaiteClient.CreateRefundAsync"/> and
-/// <see cref="DominaiteClient.GetRefundAsync"/> throw as a <see cref="DominaiteRefundException"/>,
-/// in the order the canonical contract lists them. A 5xx is none of these: nothing was queued, and
-/// it arrives as a retryable <see cref="DominaiteTransportException"/>.
+/// The codes <see cref="DominaiteClient.CreateRefundAsync"/>,
+/// <see cref="DominaiteClient.GetRefundAsync"/> and <see cref="DominaiteClient.ListRefundsAsync"/>
+/// throw as a <see cref="DominaiteRefundException"/>, in the order the canonical contract lists
+/// them. A 5xx is none of these: nothing was queued, and it arrives as a retryable
+/// <see cref="DominaiteTransportException"/>.
 /// </summary>
 public static class RefundErrorCodes
 {

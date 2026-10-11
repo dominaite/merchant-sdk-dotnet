@@ -31,7 +31,7 @@ public class ContractTests
     private const string Secret = "dms_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// <summary>The sha256 of the canonical fixture, shared across every SDK that vendors it.</summary>
-    private const string FixtureSha256 = "5128e63ae00932f8eef512469c92c3ef4e5ab6095ed08cfa0afbb9334766cc71";
+    private const string FixtureSha256 = "144cc5edf95de642378e7bc9059d05958228795c0a2f0b638bd7399fabb4c000";
 
     private static readonly JsonSerializerOptions ReadOptions = new()
     {
@@ -576,6 +576,14 @@ public class ContractTests
         Assert.True(charge.GetProperty("successExample").GetProperty("success").GetBoolean());
         Assert.False(charge.GetProperty("declinedExample").GetProperty("success").GetBoolean());
         Assert.Equal("CHARGE_DECLINED", charge.GetProperty("declinedExample").GetProperty("error").GetProperty("code").GetString());
+
+        // The 402 example carries its decline class, and the charge type reads it.
+        var declined = JsonSerializer.Deserialize<PaymentMethodCharge>(
+            charge.GetProperty("declinedExample").GetProperty("data").GetRawText(),
+            ReadOptions)!;
+        Assert.Equal(ChargeStatuses.Failed, declined.Status);
+        Assert.Equal(DeclineClasses.SoftFunds, declined.DeclineClass);
+        Assert.Equal("51", declined.DeclineCode);
     }
 
     [Fact]
