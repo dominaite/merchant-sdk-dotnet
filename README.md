@@ -40,13 +40,27 @@ is managed on the same dashboard tab.
 
 A key has scopes, fixed when the key is issued. A payments key (`payments`) makes the payment,
 refund and subscription calls. A reporting key holds `transactions:read`, `webhooks:manage` or
-both, and never `payments`. Every key can call `PingAsync` and `GetIntegrationContractAsync`. A
-call without the scope it needs throws `DominaitePermissionException` with code
-`INSUFFICIENT_SCOPE`.
+both, and never `payments`. The dashboard cannot create a reporting key: ask Dominaite support for
+one. A reporting key is for the whole account, and it cannot be bound to a storefront or a location.
+Every key can call `PingAsync` and `GetIntegrationContractAsync`. A call without the scope it needs
+throws `DominaitePermissionException` with code `INSUFFICIENT_SCOPE`.
 
 `DominaiteClient.ToString()` redacts the secret, and so does its debugger display, so a logged
 client object cannot leak it. The same goes for `CheckoutSession.ToString()` and the session's
 `CashierToken`.
+
+## What we switch on for your account
+
+We switch on the features below per account. The dashboard has no switch: ask Dominaite support.
+
+- Saved-card charges. Without the switch `ChargePaymentMethodAsync` answers 503
+  `PAYMENT_METHOD_CHARGES_DISABLED`.
+- Subscription sessions and scheduled charges. Without them a session with `AgreementId` answers
+  `SUBSCRIPTIONS_NOT_ENABLED`, and no period charge runs.
+- Card verification. Without the switch a `VerifyOnly` session answers 403
+  `VERIFY_ONLY_NOT_ENABLED`.
+- A reporting key, the second key for the webhook endpoint methods and `ListTransactionsAsync`.
+  A payments key answers 403 `INSUFFICIENT_SCOPE` on them.
 
 ## Environments
 
@@ -385,6 +399,10 @@ Charge the stored card later, off-session, with `ChargePaymentMethodAsync`. The 
 same amount, currency and order reference as a session, and an idempotency key that is required
 and signed exactly like `CreateCheckoutSessionAsync`. Send the same key when you retry.
 
+We switch saved-card charges on per account: ask Dominaite support. Until then the call throws
+`DominaiteChargeException` with code `PAYMENT_METHOD_CHARGES_DISABLED` (HTTP 503), and a retry does
+not help. We also send this code when we pause charges for a short time. Then a later retry helps.
+
 ```csharp
 try
 {
@@ -431,10 +449,15 @@ catch (DominaiteChargeException error)
         case ChargeErrorCodes.PaymentMethodNotActive:
             await AskForAnotherCardAsync();
             break;
+        // Nothing was charged. Either saved-card charges are not switched on for your account:
+        // a retry does not help, ask Dominaite support. Or we paused charges for a short time:
+        // a later retry with the SAME key helps.
+        case ChargeErrorCodes.PaymentMethodChargesDisabled:
+            await AlertOpsAsync();
+            break;
         // Nothing was charged; retry later with the SAME key (error.IdempotencyKey).
         // error.IsRetryable is true for PAYMENT_PROCESSING_UNAVAILABLE.
         case ChargeErrorCodes.DuplicateRequest:
-        case ChargeErrorCodes.PaymentMethodChargesDisabled:
         case ChargeErrorCodes.PaymentProcessingUnavailable:
             await RetryLaterAsync();
             break;
@@ -516,7 +539,8 @@ A non-null `StoredPaymentMethod` means that the card is verified. The session se
 ## Subscriptions
 
 A plan is a price that you bill every period. An agreement subscribes one of your customers to a
-plan. The platform then charges the saved card every period. These calls need a payments key.
+plan. After we switch scheduled charges on for your account, the platform charges the saved card
+every period. These calls need a payments key.
 
 1. Create a plan with `CreatePlanAsync`. Its amount, currency and interval cannot change later.
 2. Create an agreement with `CreateAgreementAsync`. It starts `pending`, and nothing is charged.
@@ -560,7 +584,8 @@ var session = await client.CreateCheckoutSessionAsync(new CheckoutSessionRequest
 
 Subscriptions are off until we switch them on. We switch it on for your account. Until then you
 can create plans and agreements, but the subscription session throws `DominaiteRefusalException`
-with code `SUBSCRIPTIONS_NOT_ENABLED`.
+with code `SUBSCRIPTIONS_NOT_ENABLED`, and the agreement stays `pending`. Scheduled charges and
+their retries need a switch of the same kind: ask Dominaite support for both.
 
 `ListPlansAsync`, `GetPlanAsync`, `UpdatePlanAsync` and `DeletePlanAsync` manage your plans.
 `UpdatePlanAsync` changes only the name, the trial days and the cancel page. `DeletePlanAsync`
@@ -778,7 +803,9 @@ periodic sweep that reads status for orders you believe are unpaid and settles t
 ### Webhook endpoints
 
 You can register endpoints from your server too. These calls need a reporting key with the
-`webhooks:manage` scope.
+`webhooks:manage` scope. The dashboard cannot create that key: ask Dominaite support for it. With
+a payments key, a call throws `DominaitePermissionException` with code `INSUFFICIENT_SCOPE`
+(HTTP 403). The dashboard's **Webhooks** tab needs no key.
 
 ```csharp
 var endpoint = await client.CreateWebhookEndpointAsync(new CreateWebhookEndpointRequest
@@ -908,6 +935,10 @@ like any other amount. The idempotency key is required and signed, exactly like 
 from YOUR refund (the return or credit-note id), and send the same key when you retry. The same key
 names the same refund and never refunds twice.
 
+The API refunds online (card-not-present) payments only. For a payment made on a terminal, it
+answers 404 `PAYMENT_NOT_FOUND`. Anyone who holds the payments key can refund up to the paid
+amount, so keep that key on your server.
+
 ```csharp
 var refund = await client.CreateRefundAsync(transactionId, new RefundRequest
 {
@@ -978,8 +1009,10 @@ Captures and voids are issued from the Dominaite dashboard.
 ## Transactions
 
 `ListTransactionsAsync` lists your online payments in a time window, oldest first, one page at a
-time. It needs a reporting key with the `transactions:read` scope. `From` is inclusive, `To` is
-exclusive, and the window is at most 31 days.
+time. It needs a reporting key with the `transactions:read` scope. The dashboard cannot create
+that key: ask Dominaite support for it. With a payments key, the call throws
+`DominaitePermissionException` with code `INSUFFICIENT_SCOPE` (HTTP 403). `From` is inclusive,
+`To` is exclusive, and the window is at most 31 days.
 
 ```csharp
 var request = new ListTransactionsRequest
