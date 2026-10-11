@@ -58,7 +58,7 @@ public sealed class DominaiteClient : IDisposable
     /// <summary>
     /// The wire encoding. camelCase to match the gateway, nulls omitted, and the relaxed encoder
     /// so non-ASCII payer names travel as UTF-8 rather than <c>\uXXXX</c> escapes - which is what
-    /// every other Dominaite SDK puts on the wire.
+    /// every other Dominaite SDK puts on the wire. Dates are written in UTC with a <c>Z</c>.
     /// </summary>
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -66,6 +66,7 @@ public sealed class DominaiteClient : IDisposable
         PropertyNameCaseInsensitive = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        Converters = { new UtcDateConverter() },
     };
 
     /// <summary>
@@ -351,8 +352,9 @@ public sealed class DominaiteClient : IDisposable
     /// <remarks>
     /// Returns the charge on HTTP 201 (200 on a durable replay of the same key) and on HTTP 402
     /// alike. A decline is a result, not an exception: the 402 charge has
-    /// <see cref="ChargeStatuses.Failed"/> and a <see cref="PaymentMethodCharge.DeclineClass"/> to
-    /// branch on. <see cref="ChargeStatuses.Pending"/> is not terminal: poll
+    /// <see cref="ChargeStatuses.Failed"/>. Its <see cref="PaymentMethodCharge.DeclineClass"/> can
+    /// still be null; the status read carries the class once it is known.
+    /// <see cref="ChargeStatuses.Pending"/> is not terminal: poll
     /// <see cref="GetStatusAsync"/> with the charge's transaction id. What throws
     /// <see cref="DominaiteChargeException"/> is the gateway answering with a code instead of a
     /// charge (409, 422, 502, 503); <c>CHARGE_OUTCOME_UNKNOWN</c> carries the charge row to poll
@@ -399,7 +401,8 @@ public sealed class DominaiteClient : IDisposable
 
         // 201 (200 on a durable replay): the charge was placed, whatever its status. 402: the
         // provider declined; the envelope says success=false but the charge is right there,
-        // status failed with its decline class, so it is a result, not an exception.
+        // status failed (its decline class can still be null), so it is a result, not an
+        // exception.
         var charge = reply.Charge();
         if (charge is not null && (reply.Success || reply.Status == 402))
         {
@@ -995,28 +998,19 @@ public sealed class DominaiteClient : IDisposable
     /// </summary>
     private static string SerializeBody(CheckoutSessionRequest request)
     {
-        ValidateMoneyParams(request.Amount, request.Currency, request.OrderReference);
-
-        var node = JsonSerializer.SerializeToNode(request, JsonOptions)!.AsObject();
-        foreach (var extra in request.Extra)
-        {
-            if (!node.ContainsKey(extra.Key))
-            {
-                node[extra.Key] = JsonSerializer.SerializeToNode(extra.Value, JsonOptions);
-            }
-        }
-
-        return node.ToJsonString(JsonOptions);
+        ValidateMoneyParams(request.Amount, request.Currency, request.OrderReference, request.VerifyOnly == true);
+        return SerializeWithExtra(request, request.Extra);
     }
 
     /// <summary>
     /// Validates a charge and returns the exact body bytes that get both signed and sent, in
-    /// contract order: amount, currency, orderReference, then description when there is one.
+    /// contract order: amount, currency, orderReference, then description and agreementId when
+    /// set, then the extra fields.
     /// </summary>
     private static string SerializeBody(ChargeRequest request)
     {
         ValidateMoneyParams(request.Amount, request.Currency, request.OrderReference);
-        return JsonSerializer.Serialize(request, JsonOptions);
+        return SerializeWithExtra(request, request.Extra);
     }
 
     /// <summary>
@@ -1031,12 +1025,36 @@ public sealed class DominaiteClient : IDisposable
                 "Amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR), or null to refund everything still refundable");
         }
 
-        return JsonSerializer.Serialize(request, JsonOptions);
+        return SerializeWithExtra(request, request.Extra);
     }
 
-    private static void ValidateMoneyParams(long amount, string? currency, string? orderReference)
+    /// <summary>
+    /// The modelled properties in declaration order, nulls omitted, then each extra field whose
+    /// key is not already in the body. Serialized once, so these are the bytes that get both
+    /// signed and sent.
+    /// </summary>
+    private static string SerializeWithExtra<T>(T request, IDictionary<string, object?> extra)
     {
-        if (amount <= 0)
+        var node = JsonSerializer.SerializeToNode(request, JsonOptions)!.AsObject();
+        foreach (var field in extra)
+        {
+            if (!node.ContainsKey(field.Key))
+            {
+                node[field.Key] = JsonSerializer.SerializeToNode(field.Value, JsonOptions);
+            }
+        }
+
+        return node.ToJsonString(JsonOptions);
+    }
+
+    /// <summary>
+    /// The money checks every create call makes before anything is sent. A verify-only session
+    /// saves a card without a payment, so its amount of 0 is by design: there the SDK leaves the
+    /// amount to the gateway.
+    /// </summary>
+    private static void ValidateMoneyParams(long amount, string? currency, string? orderReference, bool verifyOnly = false)
+    {
+        if (amount <= 0 && !verifyOnly)
         {
             throw new DominaiteValidationException(
                 "Amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR)");
@@ -1132,5 +1150,19 @@ public sealed class DominaiteClient : IDisposable
 
         var text = property.GetString();
         return string.IsNullOrEmpty(text) ? null : text;
+    }
+
+    /// <summary>
+    /// Writes a date in a request body as UTC with a <c>Z</c>, whatever offset the value carries,
+    /// so the gateway reads the same instant whatever its own time zone is. Reading is the
+    /// default.
+    /// </summary>
+    private sealed class UtcDateConverter : JsonConverter<DateTimeOffset>
+    {
+        public override DateTimeOffset Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+            => reader.GetDateTimeOffset();
+
+        public override void Write(Utf8JsonWriter writer, DateTimeOffset value, JsonSerializerOptions options)
+            => writer.WriteStringValue(value.UtcDateTime);
     }
 }

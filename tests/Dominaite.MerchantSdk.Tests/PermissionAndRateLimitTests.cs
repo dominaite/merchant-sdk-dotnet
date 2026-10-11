@@ -120,6 +120,8 @@ public class PermissionAndRateLimitTests
         using var client = ClientFor(server);
 
         var request = Session();
+        request.Amount = 0;
+        request.VerifyOnly = true;
         var error = await Assert.ThrowsAsync<DominaitePermissionException>(
             () => client.CreateCheckoutSessionWithRetryAsync(request));
 

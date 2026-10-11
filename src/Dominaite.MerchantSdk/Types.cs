@@ -31,7 +31,10 @@ public sealed class Customer
 /// </remarks>
 public sealed class CheckoutSessionRequest
 {
-    /// <summary>The amount in MINOR units: 2500 is 25.00 EUR. Integers only.</summary>
+    /// <summary>
+    /// The amount in MINOR units: 2500 is 25.00 EUR. Integers only. Leave it at 0 on a
+    /// verify-only session (<see cref="VerifyOnly"/>).
+    /// </summary>
     public long Amount { get; set; }
 
     /// <summary>ISO 4217 currency, e.g. "EUR".</summary>
@@ -56,6 +59,13 @@ public sealed class CheckoutSessionRequest
     public string? Description { get; set; }
 
     /// <summary>
+    /// The storefront (one of your websites) this session belongs to. Optional. It must be one of
+    /// your storefronts, and a key bound to one storefront refuses any other. Null is omitted from
+    /// the body.
+    /// </summary>
+    public Guid? LocationId { get; set; }
+
+    /// <summary>
     /// Ask the payer to save their card for later off-session charges. Once the session is
     /// paid, <see cref="CheckoutStatus.StoredPaymentMethod"/> carries the stored method to
     /// charge with <see cref="DominaiteClient.ChargePaymentMethodAsync"/>.
@@ -65,6 +75,26 @@ public sealed class CheckoutSessionRequest
     /// always did.
     /// </remarks>
     public bool? SaveCard { get; set; }
+
+    /// <summary>
+    /// The <c>agr_</c> id of a pending agreement. The session then takes the agreement's first
+    /// payment: the card is always saved, and the paid session activates the agreement. Null for
+    /// a one-off checkout.
+    /// </summary>
+    /// <remarks>
+    /// Amount and currency must be the agreement's own. On a plan with a trial, the amount is
+    /// your card-verification charge in the agreement's currency. Send <see cref="Consent"/> with
+    /// it, unless the agreement already has consent with a platform wording version. A refusal
+    /// arrives as a
+    /// <see cref="DominaiteRefusalException"/> with an <c>AGREEMENT_*</c> code.
+    /// </remarks>
+    public string? AgreementId { get; set; }
+
+    /// <summary>
+    /// The payer accepted the platform's recurring-payment wording: which version, when, and from
+    /// which IP address. Only with <see cref="AgreementId"/>. Null is omitted from the body.
+    /// </summary>
+    public AgreementConsent? Consent { get; set; }
 
     /// <summary>
     /// How the payer enters the card: <see cref="CheckoutIntegrations.Widget"/> (the default
@@ -77,6 +107,22 @@ public sealed class CheckoutSessionRequest
     /// omitted from the body.
     /// </remarks>
     public string? Integration { get; set; }
+
+    /// <summary>
+    /// Save the payer's card without a payment. The checkout places a small authorization, saves
+    /// the card and releases the authorization. Null is omitted from the body.
+    /// </summary>
+    /// <remarks>
+    /// Leave <see cref="Amount"/> at 0: with <c>VerifyOnly = true</c> the SDK sends 0 and does not
+    /// refuse it. <see cref="SaveCard"/> is implied (do not set it to false),
+    /// <see cref="Integration"/> must be the widget or null, and <see cref="AgreementId"/> is
+    /// refused. Verify-only is off until we switch it on for your
+    /// account; until then the gateway answers HTTP 403 <c>VERIFY_ONLY_NOT_ENABLED</c>
+    /// (<see cref="DominaitePermissionException"/>). The status read then has
+    /// <see cref="CheckoutStatus.VerifyOnly"/> true, and a non-null
+    /// <see cref="CheckoutStatus.StoredPaymentMethod"/> means the card is verified.
+    /// </remarks>
+    public bool? VerifyOnly { get; set; }
 
     /// <summary>
     /// The idempotency key. Required. It travels in the header and in the signature, never in the
@@ -97,6 +143,27 @@ public sealed class CheckoutSessionRequest
     /// </summary>
     [JsonIgnore]
     public IDictionary<string, object?> Extra { get; } = new Dictionary<string, object?>(StringComparer.Ordinal);
+}
+
+/// <summary>
+/// The payer's acceptance of the platform's recurring-payment wording, sent with a subscription
+/// session (<see cref="CheckoutSessionRequest.Consent"/>) or an agreement.
+/// </summary>
+public sealed class AgreementConsent
+{
+    /// <summary>
+    /// The version of the platform wording the payer accepted, at most 50 characters. Use a
+    /// version the platform publishes: <c>recurring.consentTextVersions</c> in the integration
+    /// contract, for example <c>recurring-2026-09</c>. A subscription session refuses any other
+    /// version.
+    /// </summary>
+    public string TextVersion { get; set; } = string.Empty;
+
+    /// <summary>When the payer accepted. Not in the future.</summary>
+    public DateTimeOffset? AcceptedAt { get; set; }
+
+    /// <summary>The payer's IP address (IPv4 or IPv6) when they accepted.</summary>
+    public string Ip { get; set; } = string.Empty;
 }
 
 /// <summary>
@@ -142,6 +209,17 @@ public sealed class CheckoutSession
     /// keep it past the session.
     /// </summary>
     public string? ClientSecret { get; set; }
+
+    /// <summary>
+    /// True on a verify-only session, where <see cref="Amount"/> is the verification
+    /// authorization. Null on every other session.
+    /// </summary>
+    public bool? VerifyOnly { get; set; }
+
+    /// <summary>
+    /// The <c>agr_</c> id when this session takes an agreement's first payment, else null.
+    /// </summary>
+    public string? AgreementId { get; set; }
 
     /// <summary>The unparsed payload, for fields this class does not model yet.</summary>
     [JsonIgnore]
@@ -386,6 +464,47 @@ public sealed class CheckoutStatus
     /// </remarks>
     public StoredPaymentMethod? StoredPaymentMethod { get; set; }
 
+    /// <summary>
+    /// What to do with a <c>failed</c> payment: one of the <see cref="DeclineClasses"/> values, or
+    /// a value added later. Null while the payment is open, on every status other than
+    /// <c>failed</c>, and on a failure that has no class yet.
+    /// </summary>
+    public string? DeclineClass { get; set; }
+
+    /// <summary>
+    /// True when you started this payment on a stored card (a charge), false for a payer-present
+    /// checkout session.
+    /// </summary>
+    public bool IsRecurring { get; set; }
+
+    /// <summary>
+    /// True when the session was a verify-only card check, not a payment. Null on every other
+    /// session.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Status"/> stays the plain transaction status: a checked card reads
+    /// <c>requires_capture</c>, then <c>cancelled</c> once the authorization is released. A
+    /// non-null <see cref="StoredPaymentMethod"/> is what says the card is verified.
+    /// </remarks>
+    public bool? VerifyOnly { get; set; }
+
+    /// <summary>
+    /// The agreement this payment belongs to: the agreement whose first payment the session took,
+    /// or the agreement a charge named. Null on a one-off checkout or charge.
+    /// </summary>
+    /// <remarks>
+    /// Read <see cref="CheckoutStatusAgreement.Status"/> to know whether the subscription started:
+    /// it stays <c>pending</c> after a decline or an abandoned session.
+    /// </remarks>
+    public CheckoutStatusAgreement? Agreement { get; set; }
+
+    /// <summary>
+    /// The <c>data.sequence</c> of the latest <c>charge.*</c> event about this transaction, to order
+    /// this read against those events. 0 on a checkout payment and before the first
+    /// <c>charge.*</c> event.
+    /// </summary>
+    public long Sequence { get; set; }
+
     /// <summary>The unparsed payload, for fields this class does not model yet.</summary>
     [JsonIgnore]
     public JsonElement Raw { get; set; }
@@ -423,6 +542,66 @@ public sealed class CheckoutStatus
         TransactionStatuses.Abandoned => true,
         _ => false,
     };
+}
+
+/// <summary>
+/// The agreement on a status read: <see cref="CheckoutStatus.Agreement"/>.
+/// </summary>
+public sealed class CheckoutStatusAgreement
+{
+    /// <summary>The <c>agr_</c> id.</summary>
+    public string Id { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The agreement's status now: one of the <see cref="AgreementStatuses"/> values, or a value
+    /// added later. <c>pending</c> until the payment is approved, then <c>active</c>, or
+    /// <c>completed</c> for a one-period plan.
+    /// </summary>
+    public string Status { get; set; } = string.Empty;
+
+    /// <summary>When the next charge is due (UTC). Null while pending and once the agreement ended.</summary>
+    public DateTimeOffset? NextChargeAt { get; set; }
+}
+
+/// <summary>
+/// The agreement status wire values, as constants plus the enumerable
+/// <see cref="AgreementStatuses.All"/>. Treat a value that is not listed as valid: the API can
+/// add statuses later.
+/// </summary>
+public static class AgreementStatuses
+{
+    /// <summary>Created, with no card on file and nothing charged yet. Its subscription session activates it.</summary>
+    public const string Pending = "pending";
+
+    /// <summary>The first period is paid and the card is on file. The platform charges each period.</summary>
+    public const string Active = "active";
+
+    /// <summary>
+    /// A period's charge failed for good (the agreement's past-due reason says why). Still alive:
+    /// a new card that pays the period makes it active again. Soft-decline retries do not put it
+    /// here.
+    /// </summary>
+    public const string PastDue = "past_due";
+
+    /// <summary>You ended it. No more charges, ever.</summary>
+    public const string Cancelled = "cancelled";
+
+    /// <summary>Every period of a plan with a fixed number of periods was charged.</summary>
+    public const string Completed = "completed";
+
+    /// <summary>A final failure. Reserved: the platform does not set it today.</summary>
+    public const string Failed = "failed";
+
+    /// <summary>Every agreement status, in the gateway's order.</summary>
+    public static IReadOnlyList<string> All { get; } =
+    [
+        Pending,
+        Active,
+        PastDue,
+        Cancelled,
+        Completed,
+        Failed,
+    ];
 }
 
 /// <summary>
@@ -538,8 +717,15 @@ public sealed class ChargeRequest
     /// <summary>Your own order id for this charge, at most 100 characters.</summary>
     public string OrderReference { get; set; } = string.Empty;
 
-    /// <summary>Free-text description stored on the transaction.</summary>
+    /// <summary>Free-text description stored on the transaction, at most 500 characters.</summary>
     public string? Description { get; set; }
+
+    /// <summary>
+    /// The <c>agr_</c> id of the agreement this charge is made under. Optional. When set, the
+    /// agreement must be yours and linked to this payment method, and the charge must be on its
+    /// terms (currency and amount). Null is omitted from the body.
+    /// </summary>
+    public string? AgreementId { get; set; }
 
     /// <summary>
     /// The idempotency key. Required, and signed exactly like a session create: it travels in the
@@ -552,6 +738,13 @@ public sealed class ChargeRequest
     /// </remarks>
     [JsonIgnore]
     public string? IdempotencyKey { get; set; }
+
+    /// <summary>
+    /// Extra body fields this class does not model yet. Merged into the JSON body at the top
+    /// level; a key that collides with a modelled property is ignored.
+    /// </summary>
+    [JsonIgnore]
+    public IDictionary<string, object?> Extra { get; } = new Dictionary<string, object?>(StringComparer.Ordinal);
 }
 
 /// <summary>
@@ -582,9 +775,10 @@ public static class ChargeStatuses
 }
 
 /// <summary>
-/// Decline class wire values, on <see cref="PaymentMethodCharge.DeclineClass"/>. Coarse
-/// buckets that tell you what to do next; the provider's own reason is in
-/// <see cref="PaymentMethodCharge.DeclineCode"/>.
+/// Decline class wire values, on <see cref="PaymentMethodCharge.DeclineClass"/> and
+/// <see cref="CheckoutStatus.DeclineClass"/>. Coarse buckets that tell you what to do next; the
+/// provider's own reason is in <see cref="PaymentMethodCharge.DeclineCode"/>. A decline can have
+/// no class yet, and the API can add classes later.
 /// </summary>
 public static class DeclineClasses
 {
@@ -610,7 +804,8 @@ public static class DeclineClasses
 /// <summary>
 /// What <see cref="DominaiteClient.ChargePaymentMethodAsync"/> returns, for a placed charge
 /// (HTTP 201) and for a provider decline (HTTP 402, status <c>failed</c>) alike. A decline is a
-/// result, not an exception: check <see cref="IsPaid"/>, then branch on <see cref="DeclineClass"/>.
+/// result, not an exception: check <see cref="IsPaid"/>, then branch on <see cref="DeclineClass"/>
+/// when it is set.
 /// Also carried on <see cref="DominaiteChargeException.Charge"/> when the gateway attached the
 /// charge row to its answer.
 /// </summary>
@@ -626,14 +821,20 @@ public sealed class PaymentMethodCharge
     public string Status { get; set; } = string.Empty;
 
     /// <summary>
-    /// One of the <see cref="DeclineClasses"/> values, set on a 402 decline; null everywhere else
-    /// (the SDK reads absent as null).
+    /// What to do with a declined charge: one of the <see cref="DeclineClasses"/> values, or a
+    /// value added later. Null on every status other than <c>failed</c>, and also on many 402
+    /// declines.
     /// </summary>
+    /// <remarks>
+    /// On a 402 the class is often still null: only the SCA decline codes classify on their own.
+    /// The payment provider's decline notice sets the class a moment later. From then on
+    /// <see cref="DominaiteClient.GetStatusAsync"/> with <see cref="TransactionId"/> carries it.
+    /// </remarks>
     public string? DeclineClass { get; set; }
 
     /// <summary>
     /// The provider's raw decline code, for your logs; branch on <see cref="DeclineClass"/>
-    /// instead. Null when DeclineClass is.
+    /// instead. Null on every status other than <c>failed</c>.
     /// </summary>
     public string? DeclineCode { get; set; }
 
@@ -641,6 +842,21 @@ public sealed class PaymentMethodCharge
     /// Dominaite's payment id for this charge. Store it against your order; poll status with it.
     /// </summary>
     public string TransactionId { get; set; } = string.Empty;
+
+    /// <summary>The <c>agr_</c> id the charge was made under, when the request named one.</summary>
+    public string? AgreementId { get; set; }
+
+    /// <summary>
+    /// The charge's outcome counter in this answer: the <c>data.sequence</c> of its
+    /// <c>charge.succeeded</c> or <c>charge.failed</c> event when the charge was decided at once,
+    /// 0 while pending.
+    /// </summary>
+    /// <remarks>
+    /// A replay of the same key returns the first answer unchanged, so this number can be lower
+    /// than a later event's. <see cref="CheckoutStatus.Sequence"/> on the status read is the live
+    /// value.
+    /// </remarks>
+    public long Sequence { get; set; }
 
     /// <summary>
     /// The unwrapped charge object as the gateway sent it, for fields this class does not model
@@ -701,6 +917,13 @@ public sealed class RefundRequest
     /// </remarks>
     [JsonIgnore]
     public string? IdempotencyKey { get; set; }
+
+    /// <summary>
+    /// Extra body fields this class does not model yet. Merged into the JSON body at the top
+    /// level; a key that collides with a modelled property is ignored.
+    /// </summary>
+    [JsonIgnore]
+    public IDictionary<string, object?> Extra { get; } = new Dictionary<string, object?>(StringComparer.Ordinal);
 }
 
 /// <summary>

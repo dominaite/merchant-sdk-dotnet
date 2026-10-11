@@ -302,4 +302,25 @@ public class RefundTests
         Assert.Equal(terminal, refund.IsTerminal);
         Assert.Equal(status == RefundStatuses.Succeeded, refund.IsSucceeded);
     }
+
+    [Fact]
+    public async Task ExtraFieldsAreSentInTheSignedBodyAndNeverReplaceAModelledField()
+    {
+        using var server = new MockServer(Reply.Raw(202, PendingRefund));
+        using var client = ClientFor(server);
+
+        var request = new RefundRequest
+        {
+            Amount = 2500,
+            IdempotencyKey = RefundKey,
+        };
+        request.Extra["futureField"] = true;
+        request.Extra["amount"] = 1;
+
+        await client.CreateRefundAsync(TransactionId, request);
+
+        var sent = server.LastRequest;
+        Assert.Equal("""{"amount":2500,"futureField":true}""", sent.Body);
+        AssertSignatureMatches(sent, CreatePath, RefundKey);
+    }
 }
