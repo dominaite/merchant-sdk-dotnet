@@ -413,7 +413,7 @@ try
                 case DeclineClasses.Hard: await StopChargingAsync(methodId); break;   // never retry
                 case DeclineClasses.SoftFunds: await RetryInAFewDaysAsync(); break;
                 case DeclineClasses.SoftScaRequired: await BringThePayerBackAsync(); break; // needs a session
-                default: await RetryLaterAsync(); break;                              // soft_other, or no class yet
+                default: await RetryLaterAsync(); break;                              // soft_other, or no class
             }
 
             break;
@@ -445,11 +445,12 @@ catch (DominaiteChargeException error)
 ```
 
 `ChargePaymentMethodAsync` returns for HTTP 201 and for HTTP 402 alike. A decline is a result,
-not an exception: the 402 charge has `Status == "failed"` and the provider's `DeclineCode`.
-`DeclineClass` (`hard`, `soft_funds`, `soft_sca_required` or `soft_other`) is often still null on
-the 402: the provider classifies most declines a moment later. Then `GetStatusAsync` and the
-`charge.failed` webhook carry the class. `IsPaid` and `IsTerminal` read the same way they do on a
-session status; `pending` is the one status that is not terminal.
+not an exception: the 402 charge has `Status == "failed"`, the provider's `DeclineCode` and a
+`DeclineClass` (`hard`, `soft_funds`, `soft_sca_required` or `soft_other`). `DeclineClass` can be
+null, for example when nobody declined the payment. The provider can refine the class later. Then
+`GetStatusAsync` carries the new class, and `charge.failed` arrives once more with it: keep the
+latest one. `IsPaid` and `IsTerminal` read the same way they do on a session status; `pending` is
+the one status that is not terminal.
 
 `DominaiteChargeException` is the gateway answering with an error code instead of a charge: HTTP
 409 (`PAYMENT_METHOD_NOT_ACTIVE`, `DUPLICATE_REQUEST`), 422 (`IDEMPOTENCY_KEY_REUSED`), 502
@@ -695,9 +696,11 @@ platform charges on an agreement; `data` is the charge plus the outcome detail, 
 `WebhookEvent.Agreement`. Both carry `data.sequence`.
 
 A verify-only session sends `verification.succeeded` or `verification.failed`, never `payment.*`
-events. `data` has the payment shape, typed as `WebhookEvent.Payment`, with `VerifyOnly` true. On
-`verification.failed`, `DeclineClass` says why the card check failed. It is null for an abandoned
-checkout.
+events. `data` has the payment shape, typed as `WebhookEvent.Payment`, with `VerifyOnly` true.
+
+On `payment.failed` and `verification.failed`, `DeclineClass` says why the payment failed. It can
+be null, for example when nobody declined the payment. The event carries the class known when it
+was sent, and the status read carries the current one.
 
 ### The saved card on payment events
 

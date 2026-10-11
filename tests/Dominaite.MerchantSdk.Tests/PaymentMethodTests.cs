@@ -714,8 +714,8 @@ public class PaymentMethodTests
     }
 
     /// <summary>
-    /// Most 402 declines have no class yet: only the SCA codes classify on their own. The answer is
-    /// still the charge, never an exception.
+    /// <c>declineClass</c> can be null on a 402 decline. The answer is still the charge, never an
+    /// exception.
     /// </summary>
     [Fact]
     public async Task A402DeclineWithoutADeclineClassIsStillAResult()

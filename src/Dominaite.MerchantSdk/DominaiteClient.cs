@@ -406,7 +406,8 @@ public sealed class DominaiteClient : IDisposable
     /// Returns the charge on HTTP 201 (200 on a durable replay of the same key) and on HTTP 402
     /// alike. A decline is a result, not an exception: the 402 charge has
     /// <see cref="ChargeStatuses.Failed"/>. Its <see cref="PaymentMethodCharge.DeclineClass"/> can
-    /// still be null; the status read carries the class once it is known.
+    /// be null, for example when nobody declined the charge; the status read carries the current
+    /// class.
     /// <see cref="ChargeStatuses.Pending"/> is not terminal: poll
     /// <see cref="GetStatusAsync"/> with the charge's transaction id. What throws
     /// <see cref="DominaiteChargeException"/> is the gateway answering with a code instead of a
@@ -454,8 +455,7 @@ public sealed class DominaiteClient : IDisposable
 
         // 201 (200 on a durable replay): the charge was placed, whatever its status. 402: the
         // provider declined; the envelope says success=false but the charge is right there,
-        // status failed (its decline class can still be null), so it is a result, not an
-        // exception.
+        // status failed (its decline class can be null), so it is a result, not an exception.
         var charge = reply.Charge();
         if (charge is not null && (reply.Success || reply.Status == 402))
         {

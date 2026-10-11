@@ -46,6 +46,9 @@ public class WebhookEventTests
 
     private const string VerificationFailedBody = """{"id":"b1b2c3d4-0000-4000-8000-000000000002","type":"verification.failed","apiVersion":"2026-09-25","createdAt":"2026-10-01T09:00:00Z","data":{"transactionId":"55555555-5555-4555-8555-555555555555","status":"failed","previousStatus":"pending","amount":100,"grossAmount":100,"surchargeAmount":null,"currency":"EUR","paymentMethod":"card","walletType":null,"originalTransactionId":null,"idempotencyKey":"verify-cust-42","orderReference":null,"orderId":"dom_1a2b3c4d5e6f","pspReference":null,"description":null,"paymentMethodBrand":"visa","paymentMethodLast4":"0002","storedPaymentMethod":null,"verifyOnly":true,"declineClass":"hard"}}""";
 
+    // A declined payment's event: payment.failed carries the decline class too.
+    private const string PaymentFailedBody = """{"id":"7f9c24e5-1d1f-4c0a-9b6c-2f3a4d5e6f73","type":"payment.failed","apiVersion":"2026-09-25","createdAt":"2026-10-11T10:00:00Z","data":{"transactionId":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","status":"failed","previousStatus":"pending","amount":2500,"currency":"EUR","verifyOnly":false,"declineClass":"soft_funds"}}""";
+
     private static string Sign(string body, long timestamp = Timestamp)
     {
         var mac = HMACSHA256.HashData(
@@ -201,9 +204,21 @@ public class WebhookEventTests
         Assert.Null(payment.StoredPaymentMethod);
     }
 
+    [Fact]
+    public void APaymentFailedEventCarriesTheDeclineClass()
+    {
+        var evt = Parse(PaymentFailedBody);
+
+        Assert.Equal(WebhookEventTypes.PaymentFailed, evt.Type);
+        var payment = evt.Payment!;
+        Assert.False(payment.VerifyOnly);
+        Assert.Equal(DeclineClasses.SoftFunds, payment.DeclineClass);
+        Assert.Equal(TransactionStatuses.Failed, payment.Status);
+    }
+
     /// <summary>
-    /// Payment events carry <c>verifyOnly</c> false and <c>declineClass</c> null today; an older
-    /// server sends neither. Both read the same.
+    /// A payment event carries <c>verifyOnly</c> false, and <c>declineClass</c> null when nobody
+    /// declined the payment; an older server sends neither field. Both read the same.
     /// </summary>
     [Fact]
     public void APaymentEventIsNotVerifyOnly_WithOrWithoutTheFields()

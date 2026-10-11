@@ -228,11 +228,14 @@ public sealed class PaymentEventData
     public bool VerifyOnly { get; set; }
 
     /// <summary>
-    /// Why the card check failed, on <c>verification.failed</c>: one of the
-    /// <see cref="DeclineClasses"/> values, or a value added later, the same value as
-    /// <see cref="CheckoutStatus.DeclineClass"/> on the status read. Null for an abandoned checkout
-    /// and on every other event.
+    /// Why the payment failed, on <c>payment.failed</c> and <c>verification.failed</c>: one of the
+    /// <see cref="DeclineClasses"/> values, or a value added later, with the same values as
+    /// <see cref="CheckoutStatus.DeclineClass"/>. It can be null, for example when nobody declined
+    /// the payment.
     /// </summary>
+    /// <remarks>
+    /// The event carries the class known when it was sent. The status read carries the current one.
+    /// </remarks>
     public string? DeclineClass { get; set; }
 
     /// <summary>The <c>data</c> object as sent, for fields this class does not model yet.</summary>
@@ -355,7 +358,10 @@ public sealed class ChargeEventData
     /// <summary>The charge description, when there is one.</summary>
     public string? Description { get; set; }
 
-    /// <summary>One of the <see cref="DeclineClasses"/> values on a decline; null otherwise, or while unclassified.</summary>
+    /// <summary>
+    /// One of the <see cref="DeclineClasses"/> values on a decline. It can be null, for example
+    /// when nobody declined the charge.
+    /// </summary>
     public string? DeclineClass { get; set; }
 
     /// <summary>The provider's raw decline code, for your logs.</summary>

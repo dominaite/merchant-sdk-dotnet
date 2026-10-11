@@ -472,8 +472,8 @@ public sealed class CheckoutStatus
 
     /// <summary>
     /// What to do with a <c>failed</c> payment: one of the <see cref="DeclineClasses"/> values, or
-    /// a value added later. Null while the payment is open, on every status other than
-    /// <c>failed</c>, and on a failure that has no class yet.
+    /// a value added later. It can be null, for example while the payment is open, or when nobody
+    /// declined the payment.
     /// </summary>
     public string? DeclineClass { get; set; }
 
@@ -783,8 +783,8 @@ public static class ChargeStatuses
 /// <summary>
 /// Decline class wire values, on <see cref="PaymentMethodCharge.DeclineClass"/> and
 /// <see cref="CheckoutStatus.DeclineClass"/>. Coarse buckets that tell you what to do next; the
-/// provider's own reason is in <see cref="PaymentMethodCharge.DeclineCode"/>. A decline can have
-/// no class yet, and the API can add classes later.
+/// provider's own reason is in <see cref="PaymentMethodCharge.DeclineCode"/>. The class can be
+/// null, for example when nobody declined the payment, and the API can add classes later.
 /// </summary>
 public static class DeclineClasses
 {
@@ -828,13 +828,12 @@ public sealed class PaymentMethodCharge
 
     /// <summary>
     /// What to do with a declined charge: one of the <see cref="DeclineClasses"/> values, or a
-    /// value added later. Null on every status other than <c>failed</c>, and also on many 402
-    /// declines.
+    /// value added later. It can be null, for example when nobody declined the charge.
     /// </summary>
     /// <remarks>
-    /// On a 402 the class is often still null: only the SCA decline codes classify on their own.
-    /// The payment provider's decline notice sets the class a moment later. From then on
-    /// <see cref="DominaiteClient.GetStatusAsync"/> with <see cref="TransactionId"/> carries it.
+    /// The payment provider can refine the class after the 402. From then on
+    /// <see cref="DominaiteClient.GetStatusAsync"/> with <see cref="TransactionId"/> carries the
+    /// new class, and the <c>charge.failed</c> event arrives once more with it.
     /// </remarks>
     public string? DeclineClass { get; set; }
 

@@ -231,8 +231,8 @@ public static class Webhooks
 
             if (evt.Data.ValueKind == JsonValueKind.Object)
             {
-                // A verify-only session's events carry the payment data shape, with verifyOnly
-                // and declineClass set.
+                // A verify-only session's events carry the payment data shape too, with
+                // verifyOnly true.
                 if (evt.Type.StartsWith("payment.", StringComparison.Ordinal)
                     || evt.Type.StartsWith("verification.", StringComparison.Ordinal))
                 {

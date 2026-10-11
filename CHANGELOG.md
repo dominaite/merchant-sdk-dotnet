@@ -14,8 +14,9 @@ types where you caught the old ones for these statuses.
   `DominaitePermissionException` with `VERIFY_ONLY_NOT_ENABLED`.
 - Webhook events `verification.succeeded` and `verification.failed`
   (`WebhookEventTypes.VerificationSucceeded` and `VerificationFailed`). A verify-only session
-  sends them instead of `payment.*` events. Their data is typed as `WebhookEvent.Payment`, and
-  `PaymentEventData` gains `VerifyOnly` and `DeclineClass`.
+  sends them instead of `payment.*` events. Their data is typed as `WebhookEvent.Payment`.
+  `PaymentEventData` gains `VerifyOnly`, and `DeclineClass` for `payment.failed` and
+  `verification.failed`.
 - Subscriptions: `CreatePlanAsync`, `ListPlansAsync`, `GetPlanAsync`, `UpdatePlanAsync` and
   `DeletePlanAsync`, and `CreateAgreementAsync`, `GetAgreementAsync` and `CancelAgreementAsync`.
   New `Plan`, `Agreement`, `AgreementConsentRecord`, `CreatePlanRequest`, `UpdatePlanRequest`,
@@ -64,9 +65,8 @@ types where you caught the old ones for these statuses.
 - A 403 no longer tells you to check your key id, secret and server clock. That hint is for 401
   only. `INSUFFICIENT_SCOPE` names the missing scope, and `VERIFY_ONLY_NOT_ENABLED` says that we
   switch it on for your account.
-- `PaymentMethodCharge.DeclineClass` can be null on a declined charge. The charge answer
-  classifies only SCA declines at once; `GetStatusAsync` and `charge.failed` carry the class
-  later. The docs no longer promise a class on every decline.
+- `DeclineClass` can be null, for example when nobody declined the payment. The docs no longer
+  promise a class on every failure.
 - Dates in a request body are written in UTC with a `Z`.
 - The README documents key scopes, verify-only sessions, subscriptions, the refund list, webhook
   endpoints, transactions and the integration contract.
