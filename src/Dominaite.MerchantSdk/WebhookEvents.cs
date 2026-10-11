@@ -29,7 +29,7 @@ public static class WebhookEventTypes
     /// <summary>A chargeback was opened.</summary>
     public const string PaymentDisputed = "payment.disputed";
 
-    /// <summary>The agreement's first payment succeeded and it is now billing.</summary>
+    /// <summary>The agreement's first payment succeeded and it is now <c>active</c>.</summary>
     public const string AgreementActivated = "agreement.activated";
 
     /// <summary>The platform gave up on the current period on the agreement's card.</summary>

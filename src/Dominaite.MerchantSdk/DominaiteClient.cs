@@ -820,8 +820,9 @@ public sealed class DominaiteClient : IDisposable
     /// </summary>
     /// <remarks>
     /// Then create a checkout session with <see cref="CheckoutSessionRequest.AgreementId"/>: the
-    /// paid session saves the card and activates the agreement. After that the platform charges
-    /// each period and sends <c>agreement.*</c> and <c>charge.*</c> webhooks.
+    /// paid session saves the card and activates the agreement. With scheduled charges on, the
+    /// platform then charges each period. Follow the agreement with the <c>agreement.*</c> and
+    /// <c>charge.*</c> webhooks.
     /// </remarks>
     /// <param name="request">
     /// The agreement. <see cref="CreateAgreementRequest.IdempotencyKey"/> is required: derive it from
