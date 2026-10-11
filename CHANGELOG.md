@@ -51,6 +51,8 @@ types where you caught the old ones for these statuses.
   (`RATE_LIMIT_EXCEEDED`, `CHARGE_VELOCITY_EXCEEDED`, `CHARGE_DECLINE_RATE_EXCEEDED`), with
   `RetryAfter` from the `Retry-After` header.
 - Wire contract fixture regenerated from the live contract, with the authorization error group.
+- Contract fixture: the shared 0.5.0 file. The session, status read and charge fields include the
+  new fields, and every example carries them.
 - Wallet reporting: `CheckoutStatus.PaymentMethod` (`card`, `wallet`, `bank_transfer` or `sepa`)
   and `CheckoutStatus.WalletType` (`apple_pay`, `google_pay`, `samsung_pay`, or a lower-cased
   identifier for a wallet not listed yet). Both are nullable: null while the payment is open and

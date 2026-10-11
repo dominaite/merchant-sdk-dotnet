@@ -31,7 +31,7 @@ public class ContractTests
     private const string Secret = "dms_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// <summary>The sha256 of the canonical fixture, shared across every SDK that vendors it.</summary>
-    private const string FixtureSha256 = "5128e63ae00932f8eef512469c92c3ef4e5ab6095ed08cfa0afbb9334766cc71";
+    private const string FixtureSha256 = "144cc5edf95de642378e7bc9059d05958228795c0a2f0b638bd7399fabb4c000";
 
     private static readonly JsonSerializerOptions ReadOptions = new()
     {
@@ -63,13 +63,8 @@ public class ContractTests
             .Select(property => property.GetCustomAttribute<JsonPropertyNameAttribute>()?.Name
                 ?? JsonNamingPolicy.CamelCase.ConvertName(property.Name))];
 
-    /// <summary>
-    /// The type models exactly the contract's fields, plus <paramref name="notInFixtureYet"/>:
-    /// fields the gateway serves that this shared fixture does not list yet. They are named here,
-    /// so the gap stays visible and a field nobody serves still fails.
-    /// </summary>
-    private static void AssertFields<T>(IEnumerable<string> expected, params string[] notInFixtureYet)
-        => Assert.Equal(expected.Union(notInFixtureYet).Order().ToList(), WireFields<T>().Order().ToList());
+    private static void AssertFields<T>(IEnumerable<string> expected)
+        => Assert.Equal(expected.Order().ToList(), WireFields<T>().Order().ToList());
 
     private static DominaiteClient ClientFor(MockServer server)
         => new(KeyId, Secret, new DominaiteClientOptions
@@ -257,7 +252,7 @@ public class ContractTests
     public void TheCheckoutObjectMatchesTheContract()
     {
         var create = Endpoint("createCheckoutSession");
-        AssertFields<CheckoutSession>(Strings(create.GetProperty("checkoutFields")), "verifyOnly", "agreementId");
+        AssertFields<CheckoutSession>(Strings(create.GetProperty("checkoutFields")));
 
         var checkout = create.GetProperty("successExample").GetProperty("checkout");
         var parsed = JsonSerializer.Deserialize<CheckoutSession>(checkout.GetRawText(), ReadOptions)!;
@@ -275,13 +270,7 @@ public class ContractTests
     public void GetStatusMatchesTheContract()
     {
         var getStatus = Endpoint("getStatus");
-        AssertFields<CheckoutStatus>(
-            Strings(getStatus.GetProperty("fields")),
-            "declineClass",
-            "isRecurring",
-            "verifyOnly",
-            "agreement",
-            "sequence");
+        AssertFields<CheckoutStatus>(Strings(getStatus.GetProperty("fields")));
 
         var parsed = JsonSerializer.Deserialize<CheckoutStatus>(
             getStatus.GetProperty("example").GetRawText(),
@@ -574,7 +563,7 @@ public class ContractTests
         Assert.Equal("/merchant-api/payment-methods/{paymentMethodId}/charges", charge.GetProperty("path").GetString());
         Assert.Equal(201, charge.GetProperty("httpStatus").GetInt32());
         Assert.Equal(402, charge.GetProperty("declinedHttpStatus").GetInt32());
-        AssertFields<PaymentMethodCharge>(Strings(charge.GetProperty("fields")), "agreementId", "sequence");
+        AssertFields<PaymentMethodCharge>(Strings(charge.GetProperty("fields")));
 
         // Both examples are envelopes whose data carries exactly the declared fields, nulls
         // included.
@@ -587,6 +576,14 @@ public class ContractTests
         Assert.True(charge.GetProperty("successExample").GetProperty("success").GetBoolean());
         Assert.False(charge.GetProperty("declinedExample").GetProperty("success").GetBoolean());
         Assert.Equal("CHARGE_DECLINED", charge.GetProperty("declinedExample").GetProperty("error").GetProperty("code").GetString());
+
+        // The 402 example carries its decline class, and the charge type reads it.
+        var declined = JsonSerializer.Deserialize<PaymentMethodCharge>(
+            charge.GetProperty("declinedExample").GetProperty("data").GetRawText(),
+            ReadOptions)!;
+        Assert.Equal(ChargeStatuses.Failed, declined.Status);
+        Assert.Equal(DeclineClasses.SoftFunds, declined.DeclineClass);
+        Assert.Equal("51", declined.DeclineCode);
     }
 
     [Fact]
