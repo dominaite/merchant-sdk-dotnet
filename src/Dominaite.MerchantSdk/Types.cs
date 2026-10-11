@@ -113,8 +113,8 @@ public sealed class CheckoutSessionRequest
     /// the card and releases the authorization. Null is omitted from the body.
     /// </summary>
     /// <remarks>
-    /// Leave <see cref="Amount"/> at 0: with <c>VerifyOnly = true</c> the SDK sends 0 and does not
-    /// refuse it. <see cref="SaveCard"/> is implied (do not set it to false),
+    /// Leave <see cref="Amount"/> at 0: with <c>VerifyOnly = true</c> the SDK sends 0, and it refuses
+    /// any other amount before sending. <see cref="SaveCard"/> is implied (do not set it to false),
     /// <see cref="Integration"/> must be the widget or null, and <see cref="AgreementId"/> is
     /// refused. Verify-only is off by default. We switch it on for your account. Until then the
     /// gateway answers HTTP 403 <c>VERIFY_ONLY_NOT_ENABLED</c>

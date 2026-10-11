@@ -1634,6 +1634,14 @@ public sealed class DominaiteClient : IDisposable
     /// </summary>
     private static void ValidateMoneyParams(long amount, string? currency, string? orderReference, bool verifyOnly = false)
     {
+        // The gateway refuses a verify-only session with any amount but 0: the platform sets the
+        // verification amount.
+        if (verifyOnly && amount != 0)
+        {
+            throw new DominaiteValidationException(
+                "Leave Amount at 0 with VerifyOnly: the platform sets the verification amount");
+        }
+
         if (amount <= 0 && !verifyOnly)
         {
             throw new DominaiteValidationException(

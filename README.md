@@ -490,7 +490,8 @@ shared byte-for-byte with the gateway: the charge vector signs
 ## Verify a card without a payment
 
 A verify-only session saves the payer's card and takes no money. Set `VerifyOnly = true` and leave
-`Amount` at 0. The checkout places a small authorization to check the card, saves the card, and
+`Amount` at 0: the platform sets the verification amount, and the SDK refuses any other amount
+before sending. The checkout places a small authorization to check the card, saves the card, and
 then releases the authorization.
 
 ```csharp

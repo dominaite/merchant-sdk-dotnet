@@ -94,6 +94,29 @@ public class SubscriptionAndVerifyOnlyTests
         Assert.Empty(server.Requests);
     }
 
+    /// <summary>The gateway refuses a verify-only amount other than 0, so the SDK refuses it first.</summary>
+    [Theory]
+    [InlineData(100)]
+    [InlineData(-100)]
+    public async Task AVerifyOnlySessionRefusesAnyAmountButZeroBeforeSending(long amount)
+    {
+        using var server = new MockServer();
+        using var client = ClientFor(server);
+
+        var error = await Assert.ThrowsAsync<DominaiteValidationException>(
+            () => client.CreateCheckoutSessionAsync(new CheckoutSessionRequest
+            {
+                Amount = amount,
+                Currency = "EUR",
+                OrderReference = "card-check-42",
+                VerifyOnly = true,
+                IdempotencyKey = VerifyKey,
+            }));
+
+        Assert.Contains("VerifyOnly", error.Message, StringComparison.Ordinal);
+        Assert.Empty(server.Requests);
+    }
+
     [Fact]
     public async Task VerifyOnlyNullOrFalseIsLeftOutOfTheBody()
     {
