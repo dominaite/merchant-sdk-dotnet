@@ -50,6 +50,12 @@ public sealed class DominaiteClient : IDisposable
     /// </summary>
     public const string PaymentsPath = "/merchant-api/payments";
 
+    /// <summary>
+    /// The subscription plans path. POST creates a plan and GET lists them; GET, PATCH and DELETE
+    /// <c>PlansPath/{planId}</c> read, update and archive one plan.
+    /// </summary>
+    public const string PlansPath = "/merchant-api/plans";
+
     /// <summary>This SDK's version, reported in the User-Agent.</summary>
     public const string Version = "0.4.0";
 
@@ -71,9 +77,9 @@ public sealed class DominaiteClient : IDisposable
     };
 
     /// <summary>
-    /// A payment method or refund id is one path segment and nothing else: it is interpolated into
-    /// the signed path, so anything that could split, escape or extend that path is refused before
-    /// signing.
+    /// A payment method, refund, plan or agreement id is one path segment and nothing else: it is
+    /// interpolated into the signed path, so anything that could split, escape or extend that path
+    /// is refused before signing.
     /// </summary>
     private static readonly Regex IdSegmentPattern = new("^[A-Za-z0-9_-]{1,100}$", RegexOptions.CultureInvariant);
 
@@ -619,6 +625,149 @@ public sealed class DominaiteClient : IDisposable
         return reply.ReadRefundList();
     }
 
+    /// <summary>
+    /// Creates a subscription plan: a price you bill every period. Subscribe a customer to it with
+    /// an agreement.
+    /// </summary>
+    /// <remarks>
+    /// Amount, currency and interval cannot change later: a new price is a new plan. A retry with
+    /// the same key and the same body returns the plan made the first time.
+    /// </remarks>
+    /// <param name="request">
+    /// The plan. <see cref="CreatePlanRequest.IdempotencyKey"/> is required: derive it from your own
+    /// plan or product id.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The plan, with the <c>plan_</c> id the other plan routes take.</returns>
+    /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 400 for a field the gateway refused (the field errors are in RawResult), or 422 <c>IDEMPOTENCY_KEY_REUSED</c> for a key first used for another plan.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry with the same key.</exception>
+    public async Task<Plan> CreatePlanAsync(
+        CreatePlanRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
+        var body = SerializeWithExtra(request, request.Extra);
+        var data = await this.CreateAsync(PlansPath, body, idempotencyKey, "plan", cancellationToken)
+            .ConfigureAwait(false);
+        return ToPlan(data);
+    }
+
+    /// <summary>
+    /// Lists your plans: the active ones first, then the archived ones, each group newest first.
+    /// </summary>
+    /// <remarks>The list has no pages. It holds at most 200 plans.</remarks>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The plans. Empty when you have none.</returns>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">An unexpected response.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<IReadOnlyList<Plan>> ListPlansAsync(CancellationToken cancellationToken = default)
+    {
+        var reply = await this.SendAsync(HttpMethod.Get, PlansPath, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        return [.. reply.ReadArray("plan list").EnumerateArray().Select(ToPlan)];
+    }
+
+    /// <summary>Reads one plan.</summary>
+    /// <param name="planId">The <see cref="Plan.Id"/>.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The plan as it is now.</returns>
+    /// <exception cref="DominaiteValidationException">The id is not one path segment; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 404 <c>PLAN_NOT_FOUND</c> for an id that is not one of your plans, or 400 for an id that is not a plan id.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<Plan> GetPlanAsync(
+        string planId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(planId);
+
+        var path = $"{PlansPath}/{NormalizeHandle(planId, "planId must be the Plan.Id from CreatePlanAsync")}";
+        var reply = await this.SendAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        return ToPlan(reply.ReadObject("plan"));
+    }
+
+    /// <summary>
+    /// Changes the name, the trial or the cancel page of a plan. The price, the currency and the
+    /// interval cannot change.
+    /// </summary>
+    /// <remarks>
+    /// The PATCH sends only the fields you set and no idempotency key: sending the same change
+    /// again gives the same plan. A new trial applies to agreements created from now on. A new
+    /// cancel page shows on the customers' next emails.
+    /// </remarks>
+    /// <param name="planId">The <see cref="Plan.Id"/>.</param>
+    /// <param name="request">The changes. Set at least one field.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The plan after the change.</returns>
+    /// <exception cref="DominaiteValidationException">The id is not one path segment, or the request changes nothing; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 404 <c>PLAN_NOT_FOUND</c>, or 400 for a field the gateway refused (the field errors are in RawResult).</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<Plan> UpdatePlanAsync(
+        string planId,
+        UpdatePlanRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(planId);
+        ArgumentNullException.ThrowIfNull(request);
+
+        var path = $"{PlansPath}/{NormalizeHandle(planId, "planId must be the Plan.Id from CreatePlanAsync")}";
+        var body = SerializeWithExtra(request, request.Extra);
+        if (body == "{}")
+        {
+            throw new DominaiteValidationException("Set at least one of Name, TrialDays or CancelUrl");
+        }
+
+        // The gateway takes no Idempotency-Key on PATCH, so the SDK signs an empty one and sends
+        // no header.
+        var reply = await this.SendAsync(HttpMethod.Patch, path, body, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        return ToPlan(reply.ReadObject("plan"));
+    }
+
+    /// <summary>
+    /// Archives a plan: it takes no new agreements. The agreements on it continue at their own
+    /// price.
+    /// </summary>
+    /// <remarks>
+    /// Resolves on HTTP 204, and again on a plan that is already archived, so a retry is safe. An
+    /// archived plan stays readable with <see cref="GetPlanAsync"/>.
+    /// </remarks>
+    /// <param name="planId">The <see cref="Plan.Id"/>.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>A task that completes once the plan is archived.</returns>
+    /// <exception cref="DominaiteValidationException">The id is not one path segment; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 404 <c>PLAN_NOT_FOUND</c> for an id that is not one of your plans.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task DeletePlanAsync(
+        string planId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(planId);
+
+        var path = $"{PlansPath}/{NormalizeHandle(planId, "planId must be the Plan.Id from CreatePlanAsync")}";
+        var reply = await this.SendAsync(HttpMethod.Delete, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        reply.ReadNothing();
+    }
+
     /// <summary>Releases the HttpClient this instance created for itself.</summary>
     public void Dispose()
     {
@@ -656,6 +805,30 @@ public sealed class DominaiteClient : IDisposable
         }
 
         return reply.Payload;
+    }
+
+    /// <summary>
+    /// Sends a create call with its idempotency key and returns the <c>data</c> object. Every error
+    /// carries the key, so the caller can retry with it.
+    /// </summary>
+    private async Task<JsonElement> CreateAsync(
+        string path,
+        string body,
+        string idempotencyKey,
+        string what,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var reply = await this.SendAsync(HttpMethod.Post, path, body, idempotencyKey, cancellationToken)
+                .ConfigureAwait(false);
+            return reply.ReadObject(what);
+        }
+        catch (DominaiteException error)
+        {
+            error.IdempotencyKey = idempotencyKey;
+            throw;
+        }
     }
 
     /// <summary>
@@ -900,6 +1073,48 @@ public sealed class DominaiteClient : IDisposable
         public string? ErrorMessage
             => (this.Envelope.TryGetProperty("error", out var error) ? StringField(error, "message") : null)
                 ?? StringField(this.Payload, "errorMessage");
+
+        /// <summary>
+        /// The <c>data</c> object on a success, or the generic rejection for a 4xx or 5xx.
+        /// </summary>
+        public JsonElement ReadObject(string what)
+        {
+            if (this.Status >= 400)
+            {
+                throw this.Rejection();
+            }
+
+            return this.Data
+                ?? throw new DominaiteApiException(this.Status, null, $"The Dominaite API answered without a {what} body.", this.Envelope);
+        }
+
+        /// <summary>
+        /// The <c>data</c> array on a success (the list routes that have no pages), or the generic
+        /// rejection for a 4xx or 5xx.
+        /// </summary>
+        public JsonElement ReadArray(string what)
+        {
+            if (this.Status >= 400)
+            {
+                throw this.Rejection();
+            }
+
+            if (!this.Envelope.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+            {
+                throw new DominaiteApiException(this.Status, null, $"The Dominaite API answered without a {what} body.", this.Envelope);
+            }
+
+            return data;
+        }
+
+        /// <summary>Nothing on a success (a 204), or the generic rejection for a 4xx or 5xx.</summary>
+        public void ReadNothing()
+        {
+            if (this.Status >= 400)
+            {
+                throw this.Rejection();
+            }
+        }
 
         /// <summary>
         /// The charge row in <c>data</c>, on a 201, a 402 and the coded 502s that attach one. Null
@@ -1186,6 +1401,28 @@ public sealed class DominaiteClient : IDisposable
         }
 
         return trimmed;
+    }
+
+    /// <summary>
+    /// A plan or agreement id exactly as given, trimmed, or a validation error. The gateway signs
+    /// these ids as the path carries them.
+    /// </summary>
+    private static string NormalizeHandle(string id, string what)
+    {
+        var trimmed = id.Trim();
+        if (!IdSegmentPattern.IsMatch(trimmed))
+        {
+            throw new DominaiteValidationException($"{what} (letters, digits, _ or -, at most 100 characters)");
+        }
+
+        return trimmed;
+    }
+
+    private static Plan ToPlan(JsonElement data)
+    {
+        var plan = Deserialize<Plan>(data, "plan");
+        plan.Raw = data;
+        return plan;
     }
 
     private static T Deserialize<T>(JsonElement payload, string what)
