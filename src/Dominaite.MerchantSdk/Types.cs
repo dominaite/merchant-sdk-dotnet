@@ -116,8 +116,8 @@ public sealed class CheckoutSessionRequest
     /// Leave <see cref="Amount"/> at 0: with <c>VerifyOnly = true</c> the SDK sends 0 and does not
     /// refuse it. <see cref="SaveCard"/> is implied (do not set it to false),
     /// <see cref="Integration"/> must be the widget or null, and <see cref="AgreementId"/> is
-    /// refused. Verify-only is off until we switch it on for your
-    /// account; until then the gateway answers HTTP 403 <c>VERIFY_ONLY_NOT_ENABLED</c>
+    /// refused. Verify-only is off by default. We switch it on for your account. Until then the
+    /// gateway answers HTTP 403 <c>VERIFY_ONLY_NOT_ENABLED</c>
     /// (<see cref="DominaitePermissionException"/>). The status read then has
     /// <see cref="CheckoutStatus.VerifyOnly"/> true, and a non-null
     /// <see cref="CheckoutStatus.StoredPaymentMethod"/> means the card is verified.

@@ -38,6 +38,12 @@ NTP - signatures older than 5 minutes are rejected with `TIMESTAMP_OUT_OF_RANGE`
 If the key has an IP allowlist, calls from anywhere else fail with `IP_NOT_ALLOWED`. The allowlist
 is managed on the same dashboard tab.
 
+A key has scopes, fixed when the key is issued. A payments key (`payments`) makes the payment,
+refund and subscription calls. A reporting key holds `transactions:read`, `webhooks:manage` or
+both, and never `payments`. Every key can call `PingAsync` and `GetIntegrationContractAsync`. A
+call without the scope it needs throws `DominaitePermissionException` with code
+`INSUFFICIENT_SCOPE`.
+
 `DominaiteClient.ToString()` redacts the secret, and so does its debugger display, so a logged
 client object cannot leak it. The same goes for `CheckoutSession.ToString()` and the session's
 `CashierToken`.
@@ -407,7 +413,7 @@ try
                 case DeclineClasses.Hard: await StopChargingAsync(methodId); break;   // never retry
                 case DeclineClasses.SoftFunds: await RetryInAFewDaysAsync(); break;
                 case DeclineClasses.SoftScaRequired: await BringThePayerBackAsync(); break; // needs a session
-                default: await RetryLaterAsync(); break;                              // soft_other
+                default: await RetryLaterAsync(); break;                              // soft_other, or no class yet
             }
 
             break;
@@ -439,10 +445,11 @@ catch (DominaiteChargeException error)
 ```
 
 `ChargePaymentMethodAsync` returns for HTTP 201 and for HTTP 402 alike. A decline is a result,
-not an exception: the 402 charge has `Status == "failed"` and a `DeclineClass` (`hard`,
-`soft_funds`, `soft_sca_required` or `soft_other`) plus the provider's `DeclineCode`. `IsPaid` and
-`IsTerminal` read the same way they do on a session status; `pending` is the one status that is
-not terminal.
+not an exception: the 402 charge has `Status == "failed"` and the provider's `DeclineCode`.
+`DeclineClass` (`hard`, `soft_funds`, `soft_sca_required` or `soft_other`) is often still null on
+the 402: the provider classifies most declines a moment later. Then `GetStatusAsync` and the
+`charge.failed` webhook carry the class. `IsPaid` and `IsTerminal` read the same way they do on a
+session status; `pending` is the one status that is not terminal.
 
 `DominaiteChargeException` is the gateway answering with an error code instead of a charge: HTTP
 409 (`PAYMENT_METHOD_NOT_ACTIVE`, `DUPLICATE_REQUEST`), 422 (`IDEMPOTENCY_KEY_REUSED`), 502
@@ -480,11 +487,92 @@ shared byte-for-byte with the gateway: the charge vector signs
 `{"amount":2500,"currency":"EUR","orderReference":"order-1043"}`, the revoke vector signs the
 `DELETE` with nothing else.
 
+## Verify a card without a payment
+
+A verify-only session saves the payer's card and takes no money. Set `VerifyOnly = true` and leave
+`Amount` at 0. The checkout places a small authorization to check the card, saves the card, and
+then releases the authorization.
+
+```csharp
+var session = await client.CreateCheckoutSessionAsync(new CheckoutSessionRequest
+{
+    Currency = "EUR",
+    OrderReference = "card-check-42",
+    VerifyOnly = true,
+    IdempotencyKey = "verify-card-check-42-EUR", // ForOrder needs an amount above 0
+});
+```
+
+Verify-only is off by default. We switch it on for your account. Until then the create call throws
+`DominaitePermissionException` with code `VERIFY_ONLY_NOT_ENABLED`.
+
+The status read has `VerifyOnly == true`. `Status` stays the plain transaction status:
+`requires_capture` when the card is checked, then `cancelled` when the authorization is released.
+A non-null `StoredPaymentMethod` means that the card is verified. The session sends
+`verification.succeeded` or `verification.failed`, never `payment.*` events.
+
+## Subscriptions
+
+A plan is a price that you bill every period. An agreement subscribes one of your customers to a
+plan. The platform then charges the saved card every period. These calls need a payments key.
+
+1. Create a plan with `CreatePlanAsync`. Its amount, currency and interval cannot change later.
+2. Create an agreement with `CreateAgreementAsync`. It starts `pending`, and nothing is charged.
+3. Create a checkout session with `AgreementId` and `Consent`. The paid session saves the card and
+   activates the agreement.
+4. Follow the agreement with the `agreement.*` and `charge.*` webhooks.
+
+```csharp
+var plan = await client.CreatePlanAsync(new CreatePlanRequest
+{
+    Name = "Pro monthly",
+    Amount = 2500,
+    Currency = "EUR",
+    IntervalUnit = IntervalUnits.Month,
+    IdempotencyKey = "plan-pro-monthly-2500-EUR",
+});
+
+var agreement = await client.CreateAgreementAsync(new CreateAgreementRequest
+{
+    PlanId = plan.Id,
+    CustomerReference = "cust-42",
+    IdempotencyKey = "subscription-cust-42-pro",
+});
+
+var contract = await client.GetIntegrationContractAsync();
+var session = await client.CreateCheckoutSessionAsync(new CheckoutSessionRequest
+{
+    Amount = 2500,
+    Currency = "EUR",
+    OrderReference = "sub-42-1",
+    AgreementId = agreement.Id,
+    Consent = new AgreementConsent
+    {
+        TextVersion = contract.Recurring!.ConsentTextVersions[0], // the wording your page shows
+        AcceptedAt = acceptedAt,
+        Ip = payerIp,
+    },
+    IdempotencyKey = IdempotencyKeys.ForOrder("checkout", "sub-42-1", 2500, "EUR"),
+});
+```
+
+Subscriptions are off until we switch them on. We switch it on for your account. Until then you
+can create plans and agreements, but the subscription session throws `DominaiteRefusalException`
+with code `SUBSCRIPTIONS_NOT_ENABLED`.
+
+`ListPlansAsync`, `GetPlanAsync`, `UpdatePlanAsync` and `DeletePlanAsync` manage your plans.
+`UpdatePlanAsync` changes only the name, the trial days and the cancel page. `DeletePlanAsync`
+archives the plan: it takes no new agreements, and the agreements on it continue.
+`GetAgreementAsync` reads an agreement, and `CancelAgreementAsync` cancels it. The platform never
+cancels an agreement on its own. A refused call throws `DominaiteApiException` with a `Code`, for
+example `PLAN_NOT_FOUND`, `PLAN_NOT_ACTIVE` or `AGREEMENT_ENDED`.
+
 ## Webhooks
 
 Webhooks are how you find out a payment succeeded without asking. Point an endpoint at your server
 on the dashboard's **Webhooks** tab, pick the events you care about, and store the `whsec_...`
-secret it shows you - it is shown exactly once, and regenerating it kills the old one.
+secret it shows you - it is shown exactly once, and regenerating it kills the old one. You can also
+register endpoints from your server: see [Webhook endpoints](#webhook-endpoints).
 
 **Verify the signature before you parse the body.** An unverified webhook is an unauthenticated
 stranger POSTing JSON at your server.
@@ -509,8 +597,8 @@ handlers that hold the raw request bytes.
 
 `Webhooks.VerifyAndParse` takes the same arguments, verifies first, and only then parses the body
 into a typed `WebhookEvent`: `Id`, `Type`, `ApiVersion`, `CreatedAt`, `Data` (the raw `data`
-object), plus `Payment`, `Agreement` or `Charge` typed for `payment.*`, `agreement.*` and
-`charge.*` events. A body that verifies but is not a readable envelope throws with
+object), plus `Payment` typed for `payment.*` and `verification.*` events, `Agreement` for
+`agreement.*` events and `Charge` for `charge.*` events. A body that verifies but is not a readable envelope throws with
 `WebhookFailureReason.MalformedPayload`.
 
 ```csharp
@@ -590,7 +678,8 @@ do not carry it, and `WebhookEvent.ApiVersion` is null for them.
 `payment.succeeded`, `payment.failed`, `payment.requires_capture`, `payment.cancelled`,
 `payment.abandoned`, `payment.refunded`, `payment.disputed`, and for stored-card charges and
 subscriptions `charge.succeeded`, `charge.retrying`, `charge.failed`, `agreement.activated`,
-`agreement.past_due`, `agreement.cancelled`. Exact case, constants on `WebhookEventTypes`;
+`agreement.past_due`, `agreement.cancelled`, and for verify-only sessions
+`verification.succeeded`, `verification.failed`. Exact case, constants on `WebhookEventTypes`;
 registering anything else is rejected.
 
 `payment.succeeded` is the only signal that means money is in hand. `requires_capture` includes
@@ -603,6 +692,11 @@ webhooked at all - poll session status if you want in-flight UX.
 platform charges on an agreement; `data` is the charge plus the outcome detail, typed as
 `WebhookEvent.Charge`. `agreement.*` carries the agreement plus `previousStatus`, typed as
 `WebhookEvent.Agreement`. Both carry `data.sequence`.
+
+A verify-only session sends `verification.succeeded` or `verification.failed`, never `payment.*`
+events. `data` has the payment shape, typed as `WebhookEvent.Payment`, with `VerifyOnly` true. On
+`verification.failed`, `DeclineClass` says why the card check failed. It is null for an abandoned
+checkout.
 
 ### The saved card on payment events
 
@@ -677,6 +771,25 @@ Webhooks complement your reconciliation sweep, they do not replace it. There are
 there is no publish outbox, and chains parked on a disabled endpoint stay parked - so keep a
 periodic sweep that reads status for orders you believe are unpaid and settles the difference.
 
+### Webhook endpoints
+
+You can register endpoints from your server too. These calls need a reporting key with the
+`webhooks:manage` scope.
+
+```csharp
+var endpoint = await client.CreateWebhookEndpointAsync(new CreateWebhookEndpointRequest
+{
+    Url = "https://shop.example.com/webhooks/dominaite",
+    Events = [WebhookEventTypes.PaymentSucceeded, WebhookEventTypes.PaymentRefunded],
+    IdempotencyKey = "webhook-orders-endpoint",
+});
+await StoreWebhookSecretAsync(endpoint.Secret!); // whsec_...
+```
+
+Store `Secret` at once. Only the first answer has it: a retry with the same key returns the
+endpoint without it. If you lose the secret, delete the endpoint and register it again.
+`ListWebhookEndpointsAsync` lists your endpoints, and `DeleteWebhookEndpointAsync` removes one.
+
 ## Status polling
 
 Use this when you cannot receive webhooks - local development with no public URL, or a network that
@@ -713,6 +826,17 @@ your order timeout - not in a tight loop, the endpoint is rate limited per key.
 Every response type also carries `Raw` (a `JsonElement`) with the unparsed payload, for fields the
 types do not model yet.
 
+## Fields the SDK does not model yet
+
+A new API field never needs a new SDK release:
+
+- Every response type has `Raw`. Read a new response field there.
+- Every request type with a body has `Extra`. The SDK adds its entries to the JSON body at the
+  top level, and ignores a key that is already a modelled property.
+  `ListTransactionsRequest.Extra` adds query parameters the same way.
+- Statuses, decline classes and event types are plain strings. A value that the SDK does not
+  know is valid, and the SDK never throws on it.
+
 ## Errors
 
 Every call throws a subclass of `DominaiteException`. Catch the subclass, and read `Code` for the
@@ -725,11 +849,11 @@ machine-readable string where there is one.
 | `DominaiteAuthException` | 401. `Code` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
 | `DominaitePermissionException` | 403. The key and the signature were good, but the call is not allowed. `Code` is `INSUFFICIENT_SCOPE` (the key does not have the scope the route needs; the message names it) or `VERIFY_ONLY_NOT_ENABLED`. | Use a key that has the scope. For verify-only: we switch it on for your account, so contact Dominaite support. Never retry-loop. |
 | `DominaiteRateLimitException` | 429. A limit refused the call and nothing was done. `Code` is `RATE_LIMIT_EXCEEDED`, `CHARGE_VELOCITY_EXCEEDED` or `CHARGE_DECLINE_RATE_EXCEEDED` (`RateLimitErrorCodes`). `RetryAfter` is the wait from the `Retry-After` header, or null when there was none. | Wait `RetryAfter` (a few seconds when null), then retry with the **same** idempotency key. `IsRetryable` is false and the retry helper does not retry it. |
-| `DominaiteTransportException` | Network failure, timeout, or a 5xx on session create, status or ping, including one whose body is an HTML error page from a proxy. `Code` keeps the gateway's code when the 5xx carried one. | Retry with the **same** idempotency key. `IsRetryable` is always true here, and elsewhere only for `PAYMENT_PROCESSING_UNAVAILABLE`. |
+| `DominaiteTransportException` | Network failure, timeout, or a 5xx, including one whose body is an HTML error page from a proxy. The charge and the revoke have their own exceptions for their 502 and 503 codes. `Code` keeps the gateway's code when the 5xx carried one. | Retry with the **same** idempotency key. `IsRetryable` is always true here, and elsewhere only for `PAYMENT_PROCESSING_UNAVAILABLE`. |
 | `DominaiteChargeException` | `ChargePaymentMethodAsync` got an error code instead of a charge: 409, 422, 502 or 503. Carries `Charge`, `TransactionId` and `RawResult`. | Branch on `Code` (see [Stored payment methods](#stored-payment-methods-recurring)). `CHARGE_OUTCOME_UNKNOWN` carries the `TransactionId` to poll; never retry it under a new key. |
-| `DominaiteRefundException` | `CreateRefundAsync` or `GetRefundAsync` got an error code instead of a refund: 400, 404, 409 or 422. Carries `RawResult`. | Branch on `Code` (see [Refunds](#refunds)). `IsRetryable` is true for `DUPLICATE_REQUEST` and `REFUND_NOT_FOUND`. |
+| `DominaiteRefundException` | `CreateRefundAsync`, `GetRefundAsync` or `ListRefundsAsync` got an error code instead of a refund: 400, 404, 409 or 422. Carries `RawResult`. | Branch on `Code` (see [Refunds](#refunds)). `IsRetryable` is true for `DUPLICATE_REQUEST` and `REFUND_NOT_FOUND`. |
 | `DominaiteRevokeException` | `RevokePaymentMethodAsync` was refused: 502 `UPSTREAM_CONTRACT_ERROR` or 503 `MERCHANT_API_UNAVAILABLE`. Nothing changed. | Retry later on 503; contact support on 502. |
-| `DominaiteApiException` | Any other rejecting or unexpected response, including a 3xx. `Code` carries the API's reason when it sent one, e.g. `IDEMPOTENCY_KEY_REQUIRED` on a 400, `PAYMENT_METHOD_NOT_FOUND` on a charge 404. | Inspect `HttpStatus` and `Code`. A 404 from `GetStatusAsync` is an unknown transaction id. |
+| `DominaiteApiException` | Any other rejecting or unexpected response, including a 3xx. `Code` carries the API's reason when it sent one, e.g. `IDEMPOTENCY_KEY_REQUIRED` on a 400, `PAYMENT_METHOD_NOT_FOUND` on a charge 404. Carries `RawResult`, the whole envelope: the field errors of a 400 are in `error.validationErrors`. | Inspect `HttpStatus` and `Code`. A 404 from `GetStatusAsync` is an unknown transaction id. |
 | `DominaiteValidationException` | Bad arguments (non-positive amount, missing field, missing idempotency key, malformed key id). | Fix the call; nothing was sent. |
 
 Failures from a session create also carry `IdempotencyKey`, so a log line tells you which key to
@@ -818,6 +942,15 @@ the refund's own transaction id, `data.amount` is that refund's amount, and
 `data.originalTransactionId` is the payment you refunded. A failed refund fires no webhook, so poll
 `GetRefundAsync` if you need to know about failures.
 
+`ListRefundsAsync` lists the refunds of one payment, newest first, as `GetRefundAsync` reads them.
+It also has `RefundedAmount` and `RefundableAmount`. Read `RefundableAmount` before a partial
+refund. A refund made in the dashboard counts in `RefundedAmount`, but it is not in the list.
+
+```csharp
+var refunds = await client.ListRefundsAsync(transactionId);
+if (refunds.RefundableAmount >= 1500) { /* a refund of 1500 can go through */ }
+```
+
 A refund call that the gateway refuses throws `DominaiteRefundException`; codes on
 `RefundErrorCodes`:
 
@@ -837,6 +970,42 @@ A refund call that the gateway refuses throws `DominaiteRefundException`; codes 
 A 5xx means nothing was queued: it is a `DominaiteTransportException`, retry with the same key.
 
 Captures and voids are issued from the Dominaite dashboard.
+
+## Transactions
+
+`ListTransactionsAsync` lists your online payments in a time window, oldest first, one page at a
+time. It needs a reporting key with the `transactions:read` scope. `From` is inclusive, `To` is
+exclusive, and the window is at most 31 days.
+
+```csharp
+var request = new ListTransactionsRequest
+{
+    From = new DateTimeOffset(2026, 10, 1, 0, 0, 0, TimeSpan.Zero),
+    To = new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero),
+};
+do
+{
+    var page = await client.ListTransactionsAsync(request);
+    foreach (var item in page.Items)
+    {
+        await BookAsync(item);
+    }
+
+    request.Cursor = page.NextCursor; // null on the last page
+}
+while (request.Cursor is not null);
+```
+
+Each item has the transaction id, your order reference, the type (`payment`, `charge` or
+`verification`), the status, the amount, the currency and the refunded amount. The status and the
+amount are the same as on the status read. A `verification` item is a card check, not a sale:
+leave it out of your revenue. Fees are not in the list.
+
+## Integration contract
+
+`GetIntegrationContractAsync` reads the public contract of the API that the client calls. It has
+the contract version, the status and event values, and the consent wording versions for
+subscription sessions. `Raw` has the whole contract.
 
 ## The three identifiers
 
