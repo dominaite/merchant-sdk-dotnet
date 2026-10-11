@@ -7,9 +7,9 @@ namespace Dominaite.MerchantSdk.Tests;
 
 /// <summary>
 /// <see cref="Webhooks.VerifyAndParse(string, string, string, int, long?)"/>: the envelope
-/// (<c>apiVersion</c>, <c>createdAt</c>), the typed <c>payment.*</c> data with its
-/// <c>storedPaymentMethod</c>, the typed <c>agreement.*</c> and <c>charge.*</c> data with their
-/// <c>sequence</c>, and payloads from servers that predate those fields.
+/// (<c>apiVersion</c>, <c>createdAt</c>), the typed <c>payment.*</c> and <c>verification.*</c>
+/// data with its <c>storedPaymentMethod</c>, the typed <c>agreement.*</c> and <c>charge.*</c> data
+/// with their <c>sequence</c>, and payloads from servers that predate those fields.
 /// </summary>
 public class WebhookEventTests
 {
@@ -39,6 +39,12 @@ public class WebhookEventTests
     private const string OldAgreementBody = """{"id":"a1b2c3d4-0000-4000-8000-000000000004","type":"agreement.activated","createdAt":"2026-09-20T10:00:00Z","data":{"id":"agr_0123456789abcdef0123456789abcdef","planId":"plan_0123456789abcdef0123456789abcdef","customerReference":"cust-42","storedPaymentMethodId":null,"status":"active","previousStatus":"pending","amount":2500,"currency":"EUR","intervalUnit":"month","intervalCount":1,"periodCount":12,"trialDays":0,"nextChargeAt":"2026-10-20T10:00:00Z","activatedAt":"2026-09-20T10:00:00Z","cancelledAt":null,"version":1}}""";
 
     private const string OldChargeBody = """{"id":"a1b2c3d4-0000-4000-8000-000000000005","type":"charge.failed","createdAt":"2026-09-20T10:00:00Z","data":{"chargeId":"ch_44444444444444448444444444444444","transactionId":"44444444-4444-4444-8444-444444444444","storedPaymentMethodId":"pm_0123456789abcdef0123456789abcdef","agreementId":null,"customerReference":null,"outcome":"failed","periodNumber":null,"attemptNumber":null,"amount":990,"currency":"EUR","paymentMethod":{"brand":"visa","last4":"4242"},"orderReference":"order-1043","description":null,"declineClass":"hard","declineCode":"05","nextAttemptAt":null,"nextChargeAt":null}}""";
+
+    // A verify-only session's events as the gateway serializes them: the payment data shape, with
+    // verifyOnly true. The failed one carries the decline class.
+    private const string VerificationSucceededBody = """{"id":"b1b2c3d4-0000-4000-8000-000000000001","type":"verification.succeeded","apiVersion":"2026-09-25","createdAt":"2026-10-01T09:00:00Z","data":{"transactionId":"55555555-5555-4555-8555-555555555555","status":"requires_capture","previousStatus":"pending","amount":100,"grossAmount":100,"surchargeAmount":null,"currency":"EUR","paymentMethod":"card","walletType":null,"originalTransactionId":null,"idempotencyKey":"verify-cust-42","orderReference":null,"orderId":"dom_1a2b3c4d5e6f","pspReference":null,"description":null,"paymentMethodBrand":"visa","paymentMethodLast4":"4242","storedPaymentMethod":{"id":"pm_0123456789abcdef0123456789abcdef","brand":"visa","last4":"4242","expiryMonth":12,"expiryYear":2030,"status":"active","retiredReason":null},"verifyOnly":true,"declineClass":null}}""";
+
+    private const string VerificationFailedBody = """{"id":"b1b2c3d4-0000-4000-8000-000000000002","type":"verification.failed","apiVersion":"2026-09-25","createdAt":"2026-10-01T09:00:00Z","data":{"transactionId":"55555555-5555-4555-8555-555555555555","status":"failed","previousStatus":"pending","amount":100,"grossAmount":100,"surchargeAmount":null,"currency":"EUR","paymentMethod":"card","walletType":null,"originalTransactionId":null,"idempotencyKey":"verify-cust-42","orderReference":null,"orderId":"dom_1a2b3c4d5e6f","pspReference":null,"description":null,"paymentMethodBrand":"visa","paymentMethodLast4":"0002","storedPaymentMethod":null,"verifyOnly":true,"declineClass":"hard"}}""";
 
     private static string Sign(string body, long timestamp = Timestamp)
     {
@@ -162,6 +168,53 @@ public class WebhookEventTests
         Assert.Equal("0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0", payment.OriginalTransactionId);
         Assert.Equal(1000, payment.Amount);
         Assert.Null(payment.StoredPaymentMethod);
+    }
+
+    [Fact]
+    public void AVerificationSucceededEventIsTypedWithTheSavedCard()
+    {
+        var evt = Parse(VerificationSucceededBody);
+
+        Assert.Equal(WebhookEventTypes.VerificationSucceeded, evt.Type);
+        Assert.Null(evt.Agreement);
+        Assert.Null(evt.Charge);
+        var payment = Assert.IsType<PaymentEventData>(evt.Payment);
+        Assert.True(payment.VerifyOnly);
+        Assert.Null(payment.DeclineClass);
+        Assert.Equal(TransactionStatuses.RequiresCapture, payment.Status);
+        Assert.Equal(100, payment.Amount);
+        Assert.Equal("verify-cust-42", payment.IdempotencyKey);
+        Assert.Equal("pm_0123456789abcdef0123456789abcdef", payment.StoredPaymentMethod!.Id);
+        Assert.True(payment.Raw.GetProperty("verifyOnly").GetBoolean());
+    }
+
+    [Fact]
+    public void AVerificationFailedEventCarriesTheDeclineClass()
+    {
+        var evt = Parse(VerificationFailedBody);
+
+        Assert.Equal(WebhookEventTypes.VerificationFailed, evt.Type);
+        var payment = evt.Payment!;
+        Assert.True(payment.VerifyOnly);
+        Assert.Equal(DeclineClasses.Hard, payment.DeclineClass);
+        Assert.Equal(TransactionStatuses.Failed, payment.Status);
+        Assert.Null(payment.StoredPaymentMethod);
+    }
+
+    /// <summary>
+    /// Payment events carry <c>verifyOnly</c> false and <c>declineClass</c> null today; an older
+    /// server sends neither. Both read the same.
+    /// </summary>
+    [Fact]
+    public void APaymentEventIsNotVerifyOnly_WithOrWithoutTheFields()
+    {
+        var withFields = SavedCardPaymentBody[..^2] + ",\"verifyOnly\":false,\"declineClass\":null}}";
+
+        foreach (var payment in new[] { Parse(withFields).Payment!, Parse(PaymentBody).Payment! })
+        {
+            Assert.False(payment.VerifyOnly);
+            Assert.Null(payment.DeclineClass);
+        }
     }
 
     [Fact]
