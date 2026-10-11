@@ -68,6 +68,12 @@ public sealed class DominaiteClient : IDisposable
     /// </summary>
     public const string WebhooksPath = "/merchant-api/webhooks";
 
+    /// <summary>
+    /// The transaction list path. GET lists your payments in a time window. The query parameters
+    /// are not part of the signed path.
+    /// </summary>
+    public const string TransactionsPath = "/merchant-api/transactions";
+
     /// <summary>This SDK's version, reported in the User-Agent.</summary>
     public const string Version = "0.4.0";
 
@@ -960,6 +966,57 @@ public sealed class DominaiteClient : IDisposable
         reply.ReadNothing();
     }
 
+    /// <summary>
+    /// Lists your online payments created in a time window, oldest first, one page at a time.
+    /// Needs an API key with the <c>transactions:read</c> scope.
+    /// </summary>
+    /// <remarks>
+    /// To read every page, call again with <see cref="ListTransactionsRequest.Cursor"/> set to the
+    /// <see cref="TransactionPage.NextCursor"/> of the last page, until it is null. Keep
+    /// <see cref="ListTransactionsRequest.From"/>, <see cref="ListTransactionsRequest.To"/> and
+    /// <see cref="ListTransactionsRequest.Status"/> the same for every page. The parameters travel
+    /// in the URL query; the signature covers the path without it.
+    /// </remarks>
+    /// <param name="request">The window, and optionally a status, a page size and a cursor.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>One page of payments.</returns>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>transactions:read</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 400 for a parameter the gateway refused, for example a window longer than 31 days or a changed cursor (the field errors are in RawResult).</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<TransactionPage> ListTransactionsAsync(
+        ListTransactionsRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        // GET signs the bare path with an EMPTY idempotency key and an EMPTY body. The query is
+        // in the URL only.
+        var reply = await this.SendRequestAsync(
+                HttpMethod.Get,
+                TransactionsPath,
+                TransactionQuery(request),
+                string.Empty,
+                string.Empty,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var data = reply.ReadObject("transaction page");
+        var page = Deserialize<TransactionPage>(data, "transaction page");
+        page.Raw = data;
+        if (data.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+        {
+            page.Items = [.. items.EnumerateArray().Select(item =>
+            {
+                var row = Deserialize<TransactionItem>(item, "transaction");
+                row.Raw = item;
+                return row;
+            })];
+        }
+
+        return page;
+    }
+
     /// <summary>Releases the HttpClient this instance created for itself.</summary>
     public void Dispose()
     {
@@ -1033,9 +1090,22 @@ public sealed class DominaiteClient : IDisposable
     /// method routes can read a 402 decline or a coded 502 as the typed answers they are, while
     /// <see cref="RequestAsync"/> rejects them generically.
     /// </remarks>
-    private async Task<ApiReply> SendAsync(
+    private Task<ApiReply> SendAsync(
         HttpMethod method,
         string path,
+        string body,
+        string idempotencyKey,
+        CancellationToken cancellationToken)
+        => this.SendRequestAsync(method, path, string.Empty, body, idempotencyKey, cancellationToken);
+
+    /// <summary>
+    /// What <see cref="SendAsync"/> does, with a query string. The query goes into the URL only:
+    /// the signed path never has one.
+    /// </summary>
+    private async Task<ApiReply> SendRequestAsync(
+        HttpMethod method,
+        string path,
+        string query,
         string body,
         string idempotencyKey,
         CancellationToken cancellationToken)
@@ -1054,7 +1124,9 @@ public sealed class DominaiteClient : IDisposable
             Body = body,
         });
 
-        using var message = new HttpRequestMessage(method, this.BaseUrl + path);
+        using var message = new HttpRequestMessage(
+            method,
+            query.Length > 0 ? $"{this.BaseUrl}{path}?{query}" : this.BaseUrl + path);
 
         // Some edges block requests without a real User-Agent, so always send one.
         message.Headers.TryAddWithoutValidation("User-Agent", this.UserAgent);
@@ -1631,6 +1703,55 @@ public sealed class DominaiteClient : IDisposable
         var endpoint = Deserialize<WebhookEndpoint>(data, "webhook endpoint");
         endpoint.Raw = data;
         return endpoint;
+    }
+
+    /// <summary>
+    /// The query of a transaction list call: the modelled parameters, then the extra ones, each
+    /// name and value percent-encoded. The window is written in UTC with a <c>Z</c>, with a
+    /// fraction only when the value has one.
+    /// </summary>
+    private static string TransactionQuery(ListTransactionsRequest request)
+    {
+        var parameters = new List<KeyValuePair<string, string>>
+        {
+            new("from", QueryInstant(request.From)),
+            new("to", QueryInstant(request.To)),
+        };
+        if (request.Status is not null)
+        {
+            parameters.Add(new("status", request.Status));
+        }
+
+        if (request.Limit is { } limit)
+        {
+            parameters.Add(new("limit", limit.ToString(CultureInfo.InvariantCulture)));
+        }
+
+        if (request.Cursor is not null)
+        {
+            parameters.Add(new("cursor", request.Cursor));
+        }
+
+        foreach (var field in request.Extra)
+        {
+            if (!parameters.Exists(parameter => string.Equals(parameter.Key, field.Key, StringComparison.Ordinal)))
+            {
+                parameters.Add(field);
+            }
+        }
+
+        return string.Join(
+            "&",
+            parameters.Select(parameter => $"{Uri.EscapeDataString(parameter.Key)}={Uri.EscapeDataString(parameter.Value)}"));
+    }
+
+    private static string QueryInstant(DateTimeOffset value)
+    {
+        var utc = value.UtcDateTime;
+        var format = utc.Ticks % TimeSpan.TicksPerSecond == 0
+            ? "yyyy-MM-dd'T'HH:mm:ss'Z'"
+            : "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'";
+        return utc.ToString(format, CultureInfo.InvariantCulture);
     }
 
     private static Plan ToPlan(JsonElement data)

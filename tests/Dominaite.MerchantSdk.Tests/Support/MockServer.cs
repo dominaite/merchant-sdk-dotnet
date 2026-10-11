@@ -40,6 +40,9 @@ public sealed class RecordedRequest
 
     public required string Path { get; init; }
 
+    /// <summary>The raw query after the <c>?</c>, still percent-encoded; empty when there is none.</summary>
+    public string Query { get; init; } = string.Empty;
+
     public required string Body { get; init; }
 
     public required Dictionary<string, string> Headers { get; init; }
@@ -177,6 +180,9 @@ public sealed class MockServer : IDisposable
                 {
                     Method = context.Request.HttpMethod,
                     Path = context.Request.Url?.AbsolutePath ?? string.Empty,
+                    Query = context.Request.RawUrl is { } rawUrl && rawUrl.IndexOf('?', StringComparison.Ordinal) is var mark and >= 0
+                        ? rawUrl[(mark + 1)..]
+                        : string.Empty,
                     Body = body,
                     Headers = headers,
                 });
