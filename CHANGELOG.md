@@ -1,9 +1,55 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
+
+Breaking: a 403 now throws `DominaitePermissionException` (it was `DominaiteAuthException`), and
+a 429 now throws `DominaiteRateLimitException` (it was `DominaiteApiException`). Catch the new
+types where you caught the old ones for these statuses.
 
 ### Added
 
+- Verify-only sessions: `CheckoutSessionRequest.VerifyOnly` saves the payer's card with no
+  payment. Leave `Amount` at 0; the SDK refuses any other amount before sending. Verify-only is
+  off by default. We switch it on for your account. Until then the create call throws
+  `DominaitePermissionException` with `VERIFY_ONLY_NOT_ENABLED`.
+- Webhook events `verification.succeeded` and `verification.failed`
+  (`WebhookEventTypes.VerificationSucceeded` and `VerificationFailed`). A verify-only session
+  sends them instead of `payment.*` events. Their data is typed as `WebhookEvent.Payment`, and
+  `PaymentEventData` gains `VerifyOnly` and `DeclineClass`.
+- Subscriptions: `CreatePlanAsync`, `ListPlansAsync`, `GetPlanAsync`, `UpdatePlanAsync` and
+  `DeletePlanAsync`, and `CreateAgreementAsync`, `GetAgreementAsync` and `CancelAgreementAsync`.
+  New `Plan`, `Agreement`, `AgreementConsentRecord`, `CreatePlanRequest`, `UpdatePlanRequest`,
+  `CreateAgreementRequest`, `IntervalUnits`, `PlanStatuses` and `PastDueReasons`. The create
+  calls need an idempotency key. `UpdatePlanAsync` sends none, because the API does not replay a
+  plan update.
+- Subscription sessions: `CheckoutSessionRequest.AgreementId` and `Consent` (`AgreementConsent`),
+  and also `LocationId`.
+- `ListRefundsAsync(transactionId)`: the refunds of one payment that you made through the API,
+  with the `RefundedAmount` and `RefundableAmount` totals (`RefundList`).
+- Webhook endpoints from your server, with a `webhooks:manage` key: `CreateWebhookEndpointAsync`,
+  `ListWebhookEndpointsAsync` and `DeleteWebhookEndpointAsync`. Only the first create answer has
+  the `whsec_` secret; a repeat with the same key has none. New `WebhookEndpoint`,
+  `CreateWebhookEndpointRequest` and `WebhookEndpointStatuses`.
+- `ListTransactionsAsync(ListTransactionsRequest)`, with a `transactions:read` key: one page of
+  your payments in a window of at most 31 days, oldest first, and the `NextCursor` of the next
+  page. The SDK signs the path without the query. New `TransactionPage`, `TransactionItem` and
+  `TransactionTypes`.
+- `GetIntegrationContractAsync()`: the contract that the API publishes about itself
+  (`IntegrationContract`). It models the version, the API base, the status and event values and
+  the subscription values. `Raw` has the whole contract.
+- Response fields: `DeclineClass`, `IsRecurring`, `VerifyOnly`, `Agreement`
+  (`CheckoutStatusAgreement`) and `Sequence` on `CheckoutStatus`; `VerifyOnly` and `AgreementId`
+  on `CheckoutSession`; `AgreementId` and `Sequence` on `PaymentMethodCharge`. Every status,
+  class and reason stays a plain string, so a value the SDK does not know never throws.
+- `ChargeRequest.AgreementId`, and `Extra` on `ChargeRequest` and `RefundRequest`. Every request
+  with a body now takes fields that the SDK does not model yet.
+- `DominaiteApiException.RawResult`: the whole JSON answer, for example the field errors of a 400
+  or `error.params.webhookId` on 409 `WEBHOOK_ALREADY_REGISTERED`.
+- `DominaitePermissionException` and `PermissionErrorCodes` (`INSUFFICIENT_SCOPE`,
+  `VERIFY_ONLY_NOT_ENABLED`). `DominaiteRateLimitException` and `RateLimitErrorCodes`
+  (`RATE_LIMIT_EXCEEDED`, `CHARGE_VELOCITY_EXCEEDED`, `CHARGE_DECLINE_RATE_EXCEEDED`), with
+  `RetryAfter` from the `Retry-After` header.
+- Wire contract fixture regenerated from the live contract, with the authorization error group.
 - Wallet reporting: `CheckoutStatus.PaymentMethod` (`card`, `wallet`, `bank_transfer` or `sepa`)
   and `CheckoutStatus.WalletType` (`apple_pay`, `google_pay`, `samsung_pay`, or a lower-cased
   identifier for a wallet not listed yet). Both are nullable: null while the payment is open and
@@ -12,6 +58,18 @@
 - `PaymentMethodCategories` and `WalletTypes` constants, each enumerable as `All`.
 - Contract fixtures: `paymentMethod` and `walletType` in the status read fields and examples, and
   the `wallets` section in the wire contract.
+
+### Changed
+
+- A 403 no longer tells you to check your key id, secret and server clock. That hint is for 401
+  only. `INSUFFICIENT_SCOPE` names the missing scope, and `VERIFY_ONLY_NOT_ENABLED` says that we
+  switch it on for your account.
+- `PaymentMethodCharge.DeclineClass` can be null on a declined charge. The charge answer
+  classifies only SCA declines at once; `GetStatusAsync` and `charge.failed` carry the class
+  later. The docs no longer promise a class on every decline.
+- Dates in a request body are written in UTC with a `Z`.
+- The README documents key scopes, verify-only sessions, subscriptions, the refund list, webhook
+  endpoints, transactions and the integration contract.
 
 ## 0.4.0
 
