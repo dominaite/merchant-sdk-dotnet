@@ -85,8 +85,8 @@ public sealed class CheckoutSessionRequest
     /// Amount and currency must be the agreement's own. On a plan with a trial, the amount is
     /// your card-verification charge in the agreement's currency. Send <see cref="Consent"/> with
     /// it, unless the agreement already has consent with a platform wording version. A refusal
-    /// arrives as a
-    /// <see cref="DominaiteRefusalException"/> with an <c>AGREEMENT_*</c> code.
+    /// arrives as a <see cref="DominaiteRefusalException"/> with an <c>AGREEMENT_*</c> code, or
+    /// with <c>SUBSCRIPTIONS_NOT_ENABLED</c> while subscriptions are off for your account.
     /// </remarks>
     public string? AgreementId { get; set; }
 
@@ -152,11 +152,16 @@ public sealed class CheckoutSessionRequest
 public sealed class AgreementConsent
 {
     /// <summary>
-    /// The version of the platform wording the payer accepted, at most 50 characters. Use a
-    /// version the platform publishes: <c>recurring.consentTextVersions</c> in the integration
-    /// contract, for example <c>recurring-2026-09</c>. A subscription session refuses any other
-    /// version.
+    /// The version of the wording the payer accepted, 1 to 50 characters.
     /// </summary>
+    /// <remarks>
+    /// On a checkout session, use a version the platform publishes:
+    /// <c>recurring.consentTextVersions</c> in the integration contract, for example
+    /// <c>recurring-2026-09</c>. A subscription session refuses any other version. On
+    /// <see cref="DominaiteClient.CreateAgreementAsync"/> it can also be your own label for the
+    /// wording on your page. The subscription session for that agreement then needs consent with a
+    /// platform version.
+    /// </remarks>
     public string TextVersion { get; set; } = string.Empty;
 
     /// <summary>When the payer accepted. Not in the future.</summary>
@@ -577,9 +582,9 @@ public static class AgreementStatuses
     public const string Active = "active";
 
     /// <summary>
-    /// A period's charge failed for good (the agreement's past-due reason says why). Still alive:
-    /// a new card that pays the period makes it active again. Soft-decline retries do not put it
-    /// here.
+    /// A period's charge failed for good (<see cref="Agreement.PastDueReason"/> says why). Still
+    /// alive: a new card that pays the period makes it active again. Soft-decline retries do not
+    /// put it here.
     /// </summary>
     public const string PastDue = "past_due";
 

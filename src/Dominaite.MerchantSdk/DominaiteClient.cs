@@ -56,6 +56,12 @@ public sealed class DominaiteClient : IDisposable
     /// </summary>
     public const string PlansPath = "/merchant-api/plans";
 
+    /// <summary>
+    /// The subscription agreements path. POST creates an agreement; GET and DELETE
+    /// <c>AgreementsPath/{agreementId}</c> read and cancel one.
+    /// </summary>
+    public const string AgreementsPath = "/merchant-api/agreements";
+
     /// <summary>This SDK's version, reported in the User-Agent.</summary>
     public const string Version = "0.4.0";
 
@@ -768,6 +774,96 @@ public sealed class DominaiteClient : IDisposable
         reply.ReadNothing();
     }
 
+    /// <summary>
+    /// Subscribes one of your customers to a plan. The agreement starts <c>pending</c> and nothing
+    /// is charged.
+    /// </summary>
+    /// <remarks>
+    /// Then create a checkout session with <see cref="CheckoutSessionRequest.AgreementId"/>: the
+    /// paid session saves the card and activates the agreement. After that the platform charges
+    /// each period and sends <c>agreement.*</c> and <c>charge.*</c> webhooks.
+    /// </remarks>
+    /// <param name="request">
+    /// The agreement. <see cref="CreateAgreementRequest.IdempotencyKey"/> is required: derive it from
+    /// your own subscription id.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The agreement, with the <c>agr_</c> id the session and the other agreement routes take.</returns>
+    /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
+    /// <exception cref="DominaiteApiException">
+    /// The gateway refused the agreement; inspect Code. HTTP 404 <c>PLAN_NOT_FOUND</c> or
+    /// <c>PAYMENT_METHOD_NOT_FOUND</c>; 409 <c>PLAN_NOT_ACTIVE</c> or <c>PAYMENT_METHOD_NOT_ACTIVE</c>;
+    /// 422 <c>AGREEMENT_CONSENT_REQUIRED</c>, <c>PAYMENT_METHOD_CURRENCY_MISMATCH</c>,
+    /// <c>PAYMENT_METHOD_CURRENCY_UNKNOWN</c>, <c>MAX_AMOUNT_BELOW_PLAN_AMOUNT</c> or
+    /// <c>IDEMPOTENCY_KEY_REUSED</c>; 400 for a field the gateway refused (the field errors are in
+    /// RawResult).
+    /// </exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry with the same key.</exception>
+    public async Task<Agreement> CreateAgreementAsync(
+        CreateAgreementRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
+        var body = SerializeWithExtra(request, request.Extra);
+        var data = await this.CreateAsync(AgreementsPath, body, idempotencyKey, "agreement", cancellationToken)
+            .ConfigureAwait(false);
+        return ToAgreement(data);
+    }
+
+    /// <summary>Reads one agreement: its status, its next charge and why it is past due.</summary>
+    /// <param name="agreementId">The <see cref="Agreement.Id"/>.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The agreement as it is now.</returns>
+    /// <exception cref="DominaiteValidationException">The id is not one path segment; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 404 <c>AGREEMENT_NOT_FOUND</c> for an id that is not one of your agreements, or 400 for an id that is not an agreement id.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task<Agreement> GetAgreementAsync(
+        string agreementId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(agreementId);
+
+        var path = $"{AgreementsPath}/{NormalizeHandle(agreementId, "agreementId must be the Agreement.Id from CreateAgreementAsync")}";
+        var reply = await this.SendAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        return ToAgreement(reply.ReadObject("agreement"));
+    }
+
+    /// <summary>Cancels an agreement: the platform charges it no more.</summary>
+    /// <remarks>
+    /// Resolves on HTTP 204, and again on an agreement that is already cancelled, so a retry is
+    /// safe. An agreement that completed or failed cannot be cancelled:
+    /// <c>AGREEMENT_ENDED</c>.
+    /// </remarks>
+    /// <param name="agreementId">The <see cref="Agreement.Id"/>.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>A task that completes once the agreement is cancelled.</returns>
+    /// <exception cref="DominaiteValidationException">The id is not one path segment; nothing was sent.</exception>
+    /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
+    /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>payments</c> scope.</exception>
+    /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
+    /// <exception cref="DominaiteApiException">HTTP 404 <c>AGREEMENT_NOT_FOUND</c>, or 409 <c>AGREEMENT_ENDED</c> for an agreement that completed or failed.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
+    public async Task CancelAgreementAsync(
+        string agreementId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(agreementId);
+
+        var path = $"{AgreementsPath}/{NormalizeHandle(agreementId, "agreementId must be the Agreement.Id from CreateAgreementAsync")}";
+        var reply = await this.SendAsync(HttpMethod.Delete, path, string.Empty, string.Empty, cancellationToken)
+            .ConfigureAwait(false);
+        reply.ReadNothing();
+    }
+
     /// <summary>Releases the HttpClient this instance created for itself.</summary>
     public void Dispose()
     {
@@ -1423,6 +1519,13 @@ public sealed class DominaiteClient : IDisposable
         var plan = Deserialize<Plan>(data, "plan");
         plan.Raw = data;
         return plan;
+    }
+
+    private static Agreement ToAgreement(JsonElement data)
+    {
+        var agreement = Deserialize<Agreement>(data, "agreement");
+        agreement.Raw = data;
+        return agreement;
     }
 
     private static T Deserialize<T>(JsonElement payload, string what)
