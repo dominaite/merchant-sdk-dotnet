@@ -78,7 +78,7 @@ public sealed class DominaiteClient : IDisposable
     public const string TransactionsPath = "/merchant-api/transactions";
 
     /// <summary>This SDK's version, reported in the User-Agent.</summary>
-    public const string Version = "0.5.0";
+    public const string Version = "0.5.1";
 
     private const string KeyIdPrefix = "dmk_";
     private const string SecretPrefix = "dms_";
@@ -1002,8 +1002,8 @@ public sealed class DominaiteClient : IDisposable
     /// <remarks>
     /// To read every page, call again with <see cref="ListTransactionsRequest.Cursor"/> set to the
     /// <see cref="TransactionPage.NextCursor"/> of the last page, until it is null. Keep
-    /// <see cref="ListTransactionsRequest.From"/>, <see cref="ListTransactionsRequest.To"/> and
-    /// <see cref="ListTransactionsRequest.Status"/> the same for every page. The parameters travel
+    /// <see cref="ListTransactionsRequest.From"/>, <see cref="ListTransactionsRequest.To"/>, the
+    /// settlement window and <see cref="ListTransactionsRequest.Status"/> the same for every page. The parameters travel
     /// in the URL query; the signature covers the path without it.
     /// </remarks>
     /// <param name="request">The window, and optionally a status, a page size and a cursor.</param>
@@ -1754,6 +1754,16 @@ public sealed class DominaiteClient : IDisposable
             new("from", QueryInstant(request.From)),
             new("to", QueryInstant(request.To)),
         };
+        if (request.SettledFrom is { } settledFrom)
+        {
+            parameters.Add(new("settledFrom", settledFrom.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)));
+        }
+
+        if (request.SettledTo is { } settledTo)
+        {
+            parameters.Add(new("settledTo", settledTo.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)));
+        }
+
         if (request.Status is not null)
         {
             parameters.Add(new("status", request.Status));
