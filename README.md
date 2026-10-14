@@ -1039,7 +1039,27 @@ while (request.Cursor is not null);
 Each item has the transaction id, your order reference, the type (`payment`, `charge` or
 `verification`), the status, the amount, the currency and the refunded amount. The status and the
 amount are the same as on the status read. A `verification` item is a card check, not a sale:
-leave it out of your revenue. Fees are not in the list.
+leave it out of your revenue.
+
+`Fee`, `NetAmount`, `SettledAt` and `PayoutId` are null until the acquirer settles the payment.
+This is usually the next business day. `NetAmount` is the amount minus the fee of this payment
+only. Deductions on the whole payout are not in it. `Fee` and `NetAmount` can change after they
+appear, so read a settlement day again before you close your books on it.
+
+To get one settlement day, set `SettledFrom` to that day and `SettledTo` to the next day. Keep
+`From` and `To` wide enough to cover when those payments were created, for example the last 31
+days:
+
+```csharp
+var today = DateOnly.FromDateTime(DateTime.UtcNow);
+var request = new ListTransactionsRequest
+{
+    From = DateTimeOffset.UtcNow.AddDays(-31),
+    To = DateTimeOffset.UtcNow,
+    SettledFrom = today.AddDays(-1),
+    SettledTo = today,
+};
+```
 
 ## Integration contract
 
