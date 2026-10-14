@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1
+
+### Added
+
+- `TransactionItem` gains `Fee`, `NetAmount`, `SettledAt` and `PayoutId`. They are null until the
+  acquirer settles the payment. `Fee` and `NetAmount` are in minor units, like `Amount`.
+  `NetAmount` is the amount minus the fee of this payment only, not the deductions on the payout.
+- `ListTransactionsRequest.SettledFrom` and `SettledTo` (`DateOnly`): a settlement window, sent
+  as `yyyy-MM-dd` query parameters. Set both or neither. `From` and `To` still apply.
+
 ## 0.5.0
 
 Breaking: a 403 now throws `DominaitePermissionException` (it was `DominaiteAuthException`), and
