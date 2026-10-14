@@ -120,6 +120,66 @@ public class TransactionTests
         Assert.Null(page.NextCursor);
     }
 
+    /// <summary>
+    /// A settled payment carries its fee, net, settlement day and payout; an unsettled one has
+    /// them absent, and a null on the wire reads the same as an absent field.
+    /// </summary>
+    [Fact]
+    public async Task TheSettlementFieldsAreReadAndNullUntilSettled()
+    {
+        using var server = new MockServer(Reply.Raw(200, """
+            {"success":true,"data":{"items":[{"transactionId":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","type":"payment","status":"succeeded","amount":8440,"currency":"EUR","createdAt":"2026-10-12T08:00:00Z","fee":152,"netAmount":8288,"settledAt":"2026-10-13T00:00:00Z","payoutId":"7c9e6679-7425-40de-944b-e07fc1f90ae7"},{"transactionId":"33333333-3333-4333-8333-333333333333","type":"charge","status":"succeeded","amount":2500,"currency":"EUR","createdAt":"2026-10-12T09:00:00Z","fee":null,"netAmount":null,"settledAt":null,"payoutId":null},{"transactionId":"44444444-4444-4444-8444-444444444444","type":"payment","status":"succeeded","amount":100,"currency":"EUR","createdAt":"2026-10-13T06:00:00Z"}],"nextCursor":null}}
+            """));
+        using var client = ClientFor(server);
+
+        var page = await client.ListTransactionsAsync(new ListTransactionsRequest
+        {
+            From = new DateTimeOffset(2026, 10, 1, 0, 0, 0, TimeSpan.Zero),
+            To = new DateTimeOffset(2026, 10, 14, 0, 0, 0, TimeSpan.Zero),
+        });
+
+        var settled = page.Items[0];
+        Assert.Equal(152, settled.Fee);
+        Assert.Equal(8288, settled.NetAmount);
+        Assert.Equal(new DateTimeOffset(2026, 10, 13, 0, 0, 0, TimeSpan.Zero), settled.SettledAt);
+        Assert.Equal("7c9e6679-7425-40de-944b-e07fc1f90ae7", settled.PayoutId);
+
+        foreach (var unsettled in page.Items.Skip(1))
+        {
+            Assert.Null(unsettled.Fee);
+            Assert.Null(unsettled.NetAmount);
+            Assert.Null(unsettled.SettledAt);
+            Assert.Null(unsettled.PayoutId);
+        }
+    }
+
+    /// <summary>
+    /// The settlement window travels as two plain dates after the creation window. The signature
+    /// still covers the bare path.
+    /// </summary>
+    [Fact]
+    public async Task TheSettlementWindowTravelsAsDatesAndTheBarePathIsSigned()
+    {
+        using var server = new MockServer(Reply.Raw(200, """{"success":true,"data":{"items":[],"nextCursor":null}}"""));
+        using var client = ClientFor(server);
+
+        await client.ListTransactionsAsync(new ListTransactionsRequest
+        {
+            From = new DateTimeOffset(2026, 9, 13, 0, 0, 0, TimeSpan.Zero),
+            To = new DateTimeOffset(2026, 10, 14, 0, 0, 0, TimeSpan.Zero),
+            SettledFrom = new DateOnly(2026, 10, 13),
+            SettledTo = new DateOnly(2026, 10, 14),
+            Status = TransactionStatuses.Succeeded,
+        });
+
+        var sent = server.LastRequest;
+        Assert.Equal("/api" + DominaiteClient.TransactionsPath, sent.Path);
+        Assert.Equal(
+            "from=2026-09-13T00%3A00%3A00Z&to=2026-10-14T00%3A00%3A00Z&settledFrom=2026-10-13&settledTo=2026-10-14&status=succeeded",
+            sent.Query);
+        AssertSignedTheBarePath(sent);
+    }
+
     [Fact]
     public async Task AnEmptyWindowGivesAnEmptyLastPage()
     {

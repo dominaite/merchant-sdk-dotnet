@@ -29,7 +29,7 @@ public static class TransactionTypes
 
 /// <summary>
 /// The parameters for <see cref="DominaiteClient.ListTransactionsAsync"/>: a time window, and
-/// optionally a status and a page.
+/// optionally a settlement window, a status and a page.
 /// </summary>
 /// <remarks>
 /// These travel as query parameters. The signature covers the path only, never the query.
@@ -48,6 +48,20 @@ public sealed class ListTransactionsRequest
     public DateTimeOffset To { get; set; }
 
     /// <summary>
+    /// The first settlement day of the settlement window, inclusive. Set it together with
+    /// <see cref="SettledTo"/>; null for no settlement window. With it, the page has only the
+    /// payments the acquirer settled in that window. <see cref="From"/> and <see cref="To"/> still
+    /// apply on the creation time.
+    /// </summary>
+    public DateOnly? SettledFrom { get; set; }
+
+    /// <summary>
+    /// The end of the settlement window, exclusive: later than <see cref="SettledFrom"/> and at
+    /// most 31 days after it. Set it together with <see cref="SettledFrom"/>.
+    /// </summary>
+    public DateOnly? SettledTo { get; set; }
+
+    /// <summary>
     /// Only the payments in this status: one of the <see cref="TransactionStatuses"/> values. Null
     /// for every status.
     /// </summary>
@@ -58,7 +72,8 @@ public sealed class ListTransactionsRequest
 
     /// <summary>
     /// The <see cref="TransactionPage.NextCursor"/> of the previous page, unchanged. Keep
-    /// <see cref="From"/>, <see cref="To"/> and <see cref="Status"/> the same as for that page.
+    /// <see cref="From"/>, <see cref="To"/>, <see cref="SettledFrom"/>, <see cref="SettledTo"/> and
+    /// <see cref="Status"/> the same as for that page.
     /// Null for the first page.
     /// </summary>
     public string? Cursor { get; set; }
@@ -92,7 +107,8 @@ public sealed class TransactionPage
 
 /// <summary>
 /// One payment in the transaction list. Its fields and values are those of the status read, so a
-/// row and <see cref="DominaiteClient.GetStatusAsync"/> of the same id agree. Fees are not in it.
+/// row and <see cref="DominaiteClient.GetStatusAsync"/> of the same id agree. The settlement
+/// fields stay null until the acquirer settles the payment.
 /// </summary>
 public sealed class TransactionItem
 {
@@ -131,6 +147,30 @@ public sealed class TransactionItem
 
     /// <summary>The amount refunded so far in MINOR units. Null when nothing was refunded.</summary>
     public long? RefundedAmount { get; set; }
+
+    /// <summary>
+    /// The acquirer fee of this payment in MINOR units of <see cref="Currency"/>. Null until the
+    /// payment is settled. It can change, or go back to null, when the settlement is matched again.
+    /// </summary>
+    public long? Fee { get; set; }
+
+    /// <summary>
+    /// <see cref="Amount"/> minus <see cref="Fee"/> in MINOR units. Null whenever <see cref="Fee"/>
+    /// is. Deductions on the whole payout are not in it, and refunds do not change it.
+    /// </summary>
+    public long? NetAmount { get; set; }
+
+    /// <summary>
+    /// The day the acquirer settled the payment, at midnight UTC: the acquirer gives a date only.
+    /// Null until settled.
+    /// </summary>
+    public DateTimeOffset? SettledAt { get; set; }
+
+    /// <summary>
+    /// The id of the payout that paid this money to you, the id the dashboard shows. Null until the
+    /// money is paid out.
+    /// </summary>
+    public string? PayoutId { get; set; }
 
     /// <summary>The row as the gateway sent it, for fields this class does not model yet.</summary>
     [JsonIgnore]
