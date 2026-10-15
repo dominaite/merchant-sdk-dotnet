@@ -20,6 +20,21 @@ public sealed class Customer
 
     /// <summary>Payer phone.</summary>
     public string? Phone { get; set; }
+
+    /// <summary>Payer billing street address, one line, at most 200 characters.</summary>
+    public string? Address { get; set; }
+
+    /// <summary>Payer billing city, at most 100 characters.</summary>
+    public string? City { get; set; }
+
+    /// <summary>Payer billing postal code, at most 20 characters.</summary>
+    public string? PostalCode { get; set; }
+
+    /// <summary>
+    /// Payer billing state or province code, at most 50 characters, e.g. "CA" or "NSW". Only used
+    /// for the United States, Canada and Australia.
+    /// </summary>
+    public string? State { get; set; }
 }
 
 /// <summary>

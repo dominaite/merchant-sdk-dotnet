@@ -100,6 +100,50 @@ public class ClientTests
             RequestSigner.Sha256Hex(sent.Body));
     }
 
+    /// <summary>
+    /// The billing address goes out under customer, after phone, in camelCase. The widget does
+    /// not ask the payer for a field that the session carries.
+    /// </summary>
+    [Fact]
+    public async Task TheBillingAddressIsSentUnderCustomer()
+    {
+        using var server = new MockServer(Reply.Enveloped(SuccessPayload));
+        using var client = ClientFor(server);
+
+        var request = Request();
+        request.Customer = new Customer
+        {
+            Email = "ana@example.com",
+            Phone = "+15551234567",
+            Address = "1 Market St",
+            City = "San Francisco",
+            PostalCode = "94105",
+            State = "CA",
+        };
+
+        await client.CreateCheckoutSessionAsync(request);
+
+        Assert.Equal(
+            """{"amount":8440,"currency":"EUR","orderReference":"order-1042","customer":{"email":"ana@example.com","phone":"+15551234567","address":"1 Market St","city":"San Francisco","postalCode":"94105","state":"CA"}}""",
+            server.LastRequest.Body);
+    }
+
+    [Fact]
+    public async Task AnUnsetBillingAddressIsLeftOffTheWire()
+    {
+        using var server = new MockServer(Reply.Enveloped(SuccessPayload));
+        using var client = ClientFor(server);
+
+        var request = Request();
+        request.Customer = new Customer { Email = "ana@example.com" };
+
+        await client.CreateCheckoutSessionAsync(request);
+
+        Assert.Equal(
+            """{"amount":8440,"currency":"EUR","orderReference":"order-1042","customer":{"email":"ana@example.com"}}""",
+            server.LastRequest.Body);
+    }
+
     [Fact]
     public async Task ExtraFieldsAreMergedIntoTheBody()
     {
