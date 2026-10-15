@@ -117,6 +117,10 @@ var session = await client.CreateCheckoutSessionAsync(new CheckoutSessionRequest
 // page that renders the widget.
 ```
 
+`Customer` is optional. Send what your checkout already collected: name, email, phone and the
+billing address (`Address`, `City`, `PostalCode`, and `State` for the United States, Canada and
+Australia). The widget does not ask the payer for a field that you send.
+
 A runnable version is in `examples/CreateSession`, using the same three environment variables:
 
 ```sh
