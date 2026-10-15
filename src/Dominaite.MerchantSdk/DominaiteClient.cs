@@ -78,7 +78,7 @@ public sealed class DominaiteClient : IDisposable
     public const string TransactionsPath = "/merchant-api/transactions";
 
     /// <summary>This SDK's version, reported in the User-Agent.</summary>
-    public const string Version = "0.5.1";
+    public const string Version = "0.5.2";
 
     private const string KeyIdPrefix = "dmk_";
     private const string SecretPrefix = "dms_";
