@@ -350,6 +350,55 @@ public class WebhookEventTests
     }
 
     [Fact]
+    public void APaymentEventWithAWrongTypedFieldVerifiesWithNoTypedData()
+    {
+        var evt = Parse(WithField(PaymentBody, "\"amount\":8440", "\"amount\":\"ten\""));
+
+        Assert.Equal(WebhookEventTypes.PaymentSucceeded, evt.Type);
+        Assert.Equal("2026-09-25", evt.ApiVersion);
+        Assert.Null(evt.Payment);
+        Assert.Equal("ten", evt.Data.GetProperty("amount").GetString());
+    }
+
+    [Fact]
+    public void AVerificationEventWithAWrongTypedFieldVerifiesWithNoTypedData()
+    {
+        var evt = Parse(WithField(VerificationSucceededBody, "\"verifyOnly\":true", "\"verifyOnly\":\"yes\""));
+
+        Assert.Equal(WebhookEventTypes.VerificationSucceeded, evt.Type);
+        Assert.Null(evt.Payment);
+        Assert.Equal("yes", evt.Data.GetProperty("verifyOnly").GetString());
+    }
+
+    [Fact]
+    public void AnAgreementEventWithAWrongTypedFieldVerifiesWithNoTypedData()
+    {
+        var evt = Parse(WithField(AgreementBody, "\"sequence\":3", "\"sequence\":\"three\""));
+
+        Assert.Equal(WebhookEventTypes.AgreementPastDue, evt.Type);
+        Assert.Null(evt.Agreement);
+        Assert.Equal("three", evt.Data.GetProperty("sequence").GetString());
+    }
+
+    [Fact]
+    public void AChargeEventWithAWrongTypedFieldVerifiesWithNoTypedData()
+    {
+        var evt = Parse(WithField(PlatformChargeBody, "\"periodNumber\":2", "\"periodNumber\":\"two\""));
+
+        Assert.Equal(WebhookEventTypes.ChargeRetrying, evt.Type);
+        Assert.Null(evt.Charge);
+        Assert.Equal("two", evt.Data.GetProperty("periodNumber").GetString());
+        Assert.Equal(JsonValueKind.Object, evt.Raw.GetProperty("data").ValueKind);
+    }
+
+    private static string WithField(string body, string field, string replacement)
+    {
+        var changed = body.Replace(field, replacement, StringComparison.Ordinal);
+        Assert.NotEqual(body, changed);
+        return changed;
+    }
+
+    [Fact]
     public void ASequenceOfZeroIsKeptAsZero()
     {
         var body = AgreementBody.Replace("\"sequence\":3", "\"sequence\":0", StringComparison.Ordinal);
@@ -418,7 +467,6 @@ public class WebhookEventTests
     [InlineData("[1,2,3]")]
     [InlineData("""{"type":"payment.succeeded","data":{}}""")]
     [InlineData("""{"id":"x","type":"payment.succeeded","createdAt":"yesterday","data":{}}""")]
-    [InlineData("""{"id":"x","type":"charge.succeeded","data":{"chargeId":"ch_1","sequence":"three"}}""")]
     public void ASignedBodyThatIsNotAnEnvelopeIsMalformedPayload(string body)
     {
         var error = Assert.Throws<DominaiteWebhookException>(() => Parse(body));

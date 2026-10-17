@@ -236,18 +236,27 @@ public static class Webhooks
                 if (evt.Type.StartsWith("payment.", StringComparison.Ordinal)
                     || evt.Type.StartsWith("verification.", StringComparison.Ordinal))
                 {
-                    evt.Payment = evt.Data.Deserialize<PaymentEventData>(EventJsonOptions)!;
-                    evt.Payment.Raw = evt.Data;
+                    evt.Payment = TypedData<PaymentEventData>(evt.Data);
+                    if (evt.Payment is not null)
+                    {
+                        evt.Payment.Raw = evt.Data;
+                    }
                 }
                 else if (evt.Type.StartsWith("agreement.", StringComparison.Ordinal))
                 {
-                    evt.Agreement = evt.Data.Deserialize<AgreementEventData>(EventJsonOptions)!;
-                    evt.Agreement.Raw = evt.Data;
+                    evt.Agreement = TypedData<AgreementEventData>(evt.Data);
+                    if (evt.Agreement is not null)
+                    {
+                        evt.Agreement.Raw = evt.Data;
+                    }
                 }
                 else if (evt.Type.StartsWith("charge.", StringComparison.Ordinal))
                 {
-                    evt.Charge = evt.Data.Deserialize<ChargeEventData>(EventJsonOptions)!;
-                    evt.Charge.Raw = evt.Data;
+                    evt.Charge = TypedData<ChargeEventData>(evt.Data);
+                    if (evt.Charge is not null)
+                    {
+                        evt.Charge.Raw = evt.Data;
+                    }
                 }
             }
 
@@ -256,6 +265,24 @@ public static class Webhooks
         catch (JsonException error)
         {
             throw MalformedPayload($"the body is not a readable envelope ({error.Message})");
+        }
+    }
+
+    /// <summary>
+    /// Maps a verified event's <c>data</c> to its typed model. A field of an unexpected JSON type
+    /// gives null rather than an error, so a correctly signed event still reaches your handler
+    /// with <see cref="WebhookEvent.Data"/> as sent.
+    /// </summary>
+    private static T? TypedData<T>(JsonElement data)
+        where T : class
+    {
+        try
+        {
+            return data.Deserialize<T>(EventJsonOptions);
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 
