@@ -52,8 +52,8 @@ public sealed class CreateWebhookEndpointRequest
     /// body.
     /// </summary>
     /// <remarks>
-    /// A retry with the same key and body returns the same endpoint, without the secret. Only the
-    /// first answer has the secret.
+    /// Only the first answer has the secret. After a timeout, retry with the same key and body. If
+    /// the answer has no secret, delete that endpoint and create it again with a new key.
     /// </remarks>
     [JsonIgnore]
     public string? IdempotencyKey { get; set; }

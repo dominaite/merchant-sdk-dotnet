@@ -879,8 +879,9 @@ var endpoint = await client.CreateWebhookEndpointAsync(new CreateWebhookEndpoint
 await StoreWebhookSecretAsync(endpoint.Secret!); // whsec_...
 ```
 
-Store `Secret` at once. Only the first answer has it: a retry with the same key returns the
-endpoint without it. If you lose the secret, delete the endpoint and register it again.
+Store `Secret` at once. Only the first answer has it. After a timeout, retry with the same key.
+If the answer has no secret, delete that endpoint and create it again with a new key. Do the same
+if you lose the secret later.
 `ListWebhookEndpointsAsync` lists your endpoints, and `DeleteWebhookEndpointAsync` removes one.
 
 ## Status polling

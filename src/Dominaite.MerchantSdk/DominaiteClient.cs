@@ -966,9 +966,9 @@ public sealed class DominaiteClient : IDisposable
     /// with the <c>webhooks:manage</c> scope.
     /// </summary>
     /// <remarks>
-    /// Store <see cref="WebhookEndpoint.Secret"/> from this answer: no other answer has it. A
-    /// retry with the same key returns the same endpoint without the secret. If you lost the
-    /// secret, delete the endpoint and register it again with a new key. On
+    /// Store <see cref="WebhookEndpoint.Secret"/> from this answer: no other answer has it. After
+    /// a timeout, retry with the same key. If the answer has no secret, delete that endpoint and
+    /// create it again with a new key. Do the same if you lose the secret later. On
     /// <c>WEBHOOK_ALREADY_REGISTERED</c> the key was used for an endpoint that still exists, and
     /// its id is in <c>error.params.webhookId</c> of
     /// <see cref="DominaiteApiException.RawResult"/>. The client's retry policy never retries this
