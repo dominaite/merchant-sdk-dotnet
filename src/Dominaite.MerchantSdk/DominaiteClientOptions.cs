@@ -28,8 +28,10 @@ public sealed class DominaiteClientOptions
     public TimeSpan Timeout { get; set; } = DefaultTimeout;
 
     /// <summary>
-    /// Appended to the SDK's User-Agent, which helps when Dominaite support reads the access logs
-    /// for your integration.
+    /// Appended to the SDK's User-Agent after one space, which helps when Dominaite support reads
+    /// the access logs for your integration. The SDK sends
+    /// <c>dominaite-dotnet/&lt;version&gt; (dotnet &lt;runtime version&gt;) &lt;suffix&gt;</c>. A suffix
+    /// with a control character fails construction with a <see cref="DominaiteValidationException"/>.
     /// </summary>
     public string? UserAgentSuffix { get; set; }
 

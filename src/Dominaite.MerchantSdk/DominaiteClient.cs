@@ -160,9 +160,7 @@ public sealed class DominaiteClient : IDisposable
         this._secret = secret;
         this.BaseUrl = baseUrl;
 
-        this.UserAgent = string.IsNullOrWhiteSpace(options.UserAgentSuffix)
-            ? $"dominaite-dotnet/{Version}"
-            : $"dominaite-dotnet/{Version} {options.UserAgentSuffix.Trim()}";
+        this.UserAgent = BuildUserAgent(options.UserAgentSuffix);
 
         if (options.HttpClient is not null)
         {
@@ -1265,6 +1263,28 @@ public sealed class DominaiteClient : IDisposable
 
             return reply;
         }
+    }
+
+    /// <summary>
+    /// <c>dominaite-dotnet/&lt;version&gt; (dotnet &lt;runtime version&gt;)</c>, then the caller's suffix.
+    /// No operating system. A suffix with a control character would split the header, so it is
+    /// refused.
+    /// </summary>
+    private static string BuildUserAgent(string? suffix)
+    {
+        var userAgent = $"dominaite-dotnet/{Version} (dotnet {Environment.Version})";
+        var trimmed = suffix?.Trim();
+        if (string.IsNullOrEmpty(trimmed))
+        {
+            return userAgent;
+        }
+
+        if (trimmed.Any(char.IsControl))
+        {
+            throw new DominaiteValidationException("UserAgentSuffix must not contain control characters");
+        }
+
+        return $"{userAgent} {trimmed}";
     }
 
     /// <summary>
