@@ -88,6 +88,22 @@ public class WireContractTests
     }
 
     [Fact]
+    public void RecurringWebhookEvents_MatchTheGateway_InOrder()
+    {
+        Assert.Equal(
+            Strings(Wire().GetProperty("recurringWebhookEvents")),
+            new[]
+            {
+                WebhookEventTypes.AgreementActivated,
+                WebhookEventTypes.AgreementPastDue,
+                WebhookEventTypes.AgreementCancelled,
+                WebhookEventTypes.ChargeSucceeded,
+                WebhookEventTypes.ChargeFailed,
+                WebhookEventTypes.ChargeRetrying,
+            });
+    }
+
+    [Fact]
     public void ValidationResponses_AreHttp400()
     {
         Assert.Equal(400, Wire().GetProperty("validationHttpStatus").GetInt32());
