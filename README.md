@@ -1114,3 +1114,18 @@ subscription sessions. `Raw` has the whole contract.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Versioning and support
+
+The SDK is 0.x on purpose. A minor release (for example 0.6 to 0.7) can contain a breaking
+change. A patch release (0.6.0 to 0.6.1) does not. `CHANGELOG.md` lists every breaking change
+and what to do about it. Pin the minor version you tested with, for example
+`<PackageReference Include="Dominaite.MerchantSdk" Version="[0.6.0,0.7.0)" />`.
+
+The SDK needs .NET 8 or later. The package targets `net8.0`.
+
+When the API marks your SDK version as deprecated, it sends a `Dominaite-Sdk-Notice` header.
+The client turns it into one warning per distinct notice (see
+[Logging and warnings](#logging-and-warnings)). The warning names the version to upgrade to and
+the sunset date when the notice carries them. Route `OnWarning` to a log you read, so you see
+the notice before the sunset date. A response without the header changes nothing.
