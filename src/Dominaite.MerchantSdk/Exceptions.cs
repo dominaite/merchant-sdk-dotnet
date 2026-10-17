@@ -35,6 +35,13 @@ public abstract class DominaiteException : Exception
     public string? IdempotencyKey { get; internal set; }
 
     /// <summary>
+    /// The id the API gave the failed request: the <c>Dominaite-Request-Id</c> header, else the
+    /// body's <c>metadata.requestId</c>. Null when nothing reached the API or it sent no id. Quote
+    /// it to Dominaite support.
+    /// </summary>
+    public string? RequestId { get; internal set; }
+
+    /// <summary>
     /// True when retrying can help, and only with the SAME idempotency key: every
     /// <see cref="DominaiteTransportException"/>, and any answer coded
     /// <c>PAYMENT_PROCESSING_UNAVAILABLE</c> (a 200 refusal on session create, a 503 on a

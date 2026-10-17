@@ -247,6 +247,13 @@ public sealed class CheckoutSession
     public JsonElement Raw { get; set; }
 
     /// <summary>
+    /// The id the API gave this request: the <c>Dominaite-Request-Id</c> header, else the body's
+    /// <c>metadata.requestId</c>. Null when the API sent no id. Quote it to Dominaite support.
+    /// </summary>
+    [JsonIgnore]
+    public string? RequestId { get; internal set; }
+
+    /// <summary>
     /// A description with the session token and client secret redacted, so a logged session
     /// object cannot leak a bearer credential.
     /// </summary>
@@ -529,6 +536,13 @@ public sealed class CheckoutStatus
     /// <summary>The unparsed payload, for fields this class does not model yet.</summary>
     [JsonIgnore]
     public JsonElement Raw { get; set; }
+
+    /// <summary>
+    /// The id the API gave this request: the <c>Dominaite-Request-Id</c> header, else the body's
+    /// <c>metadata.requestId</c>. Null when the API sent no id. Quote it to Dominaite support.
+    /// </summary>
+    [JsonIgnore]
+    public string? RequestId { get; internal set; }
 
     /// <summary>
     /// True only for <c>succeeded</c>. <c>refunded</c> and <c>partially_refunded</c> mean the
@@ -888,6 +902,13 @@ public sealed class PaymentMethodCharge
     [JsonIgnore]
     public JsonElement Raw { get; set; }
 
+    /// <summary>
+    /// The id the API gave this request: the <c>Dominaite-Request-Id</c> header, else the body's
+    /// <c>metadata.requestId</c>. Null when the API sent no id. Quote it to Dominaite support.
+    /// </summary>
+    [JsonIgnore]
+    public string? RequestId { get; internal set; }
+
     /// <summary>True only for <c>succeeded</c>.</summary>
     [JsonIgnore]
     public bool IsPaid => string.Equals(this.Status, ChargeStatuses.Succeeded, StringComparison.Ordinal);
@@ -1027,6 +1048,13 @@ public sealed class Refund
     [JsonIgnore]
     public JsonElement Raw { get; set; }
 
+    /// <summary>
+    /// The id the API gave this request: the <c>Dominaite-Request-Id</c> header, else the body's
+    /// <c>metadata.requestId</c>. Null when the API sent no id. Quote it to Dominaite support.
+    /// </summary>
+    [JsonIgnore]
+    public string? RequestId { get; internal set; }
+
     /// <summary>True only for <c>succeeded</c>: the money went back to the payer.</summary>
     [JsonIgnore]
     public bool IsSucceeded => string.Equals(this.Status, RefundStatuses.Succeeded, StringComparison.Ordinal);
@@ -1078,6 +1106,13 @@ public sealed class RefundList
     /// <summary>The unwrapped list as the gateway sent it, for fields this class does not model yet.</summary>
     [JsonIgnore]
     public JsonElement Raw { get; set; }
+
+    /// <summary>
+    /// The id the API gave this request: the <c>Dominaite-Request-Id</c> header, else the body's
+    /// <c>metadata.requestId</c>. Null when the API sent no id. Quote it to Dominaite support.
+    /// </summary>
+    [JsonIgnore]
+    public string? RequestId { get; internal set; }
 }
 
 /// <summary>
@@ -1107,4 +1142,11 @@ public sealed class PingResponse
     /// <summary>The unparsed payload, for fields this class does not model yet.</summary>
     [JsonIgnore]
     public JsonElement Raw { get; set; }
+
+    /// <summary>
+    /// The id the API gave this request: the <c>Dominaite-Request-Id</c> header, else the body's
+    /// <c>metadata.requestId</c>. Null when the API sent no id. Quote it to Dominaite support.
+    /// </summary>
+    [JsonIgnore]
+    public string? RequestId { get; internal set; }
 }

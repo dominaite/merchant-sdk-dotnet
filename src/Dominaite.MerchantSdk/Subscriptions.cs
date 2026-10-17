@@ -185,6 +185,13 @@ public sealed class Plan
     [JsonIgnore]
     public JsonElement Raw { get; set; }
 
+    /// <summary>
+    /// The id the API gave this request: the <c>Dominaite-Request-Id</c> header, else the body's
+    /// <c>metadata.requestId</c>. Null when the API sent no id. Quote it to Dominaite support.
+    /// </summary>
+    [JsonIgnore]
+    public string? RequestId { get; internal set; }
+
     /// <summary>True only for <c>active</c>: the plan takes new agreements.</summary>
     [JsonIgnore]
     public bool IsActive => string.Equals(this.Status, PlanStatuses.Active, StringComparison.Ordinal);
@@ -383,6 +390,13 @@ public sealed class Agreement
     /// <summary>The unwrapped agreement as the gateway sent it, for fields this class does not model yet.</summary>
     [JsonIgnore]
     public JsonElement Raw { get; set; }
+
+    /// <summary>
+    /// The id the API gave this request: the <c>Dominaite-Request-Id</c> header, else the body's
+    /// <c>metadata.requestId</c>. Null when the API sent no id. Quote it to Dominaite support.
+    /// </summary>
+    [JsonIgnore]
+    public string? RequestId { get; internal set; }
 }
 
 /// <summary>

@@ -102,6 +102,13 @@ public sealed class WebhookEndpoint
     [JsonIgnore]
     public JsonElement Raw { get; set; }
 
+    /// <summary>
+    /// The id the API gave this request: the <c>Dominaite-Request-Id</c> header, else the body's
+    /// <c>metadata.requestId</c>. Null when the API sent no id. Quote it to Dominaite support.
+    /// </summary>
+    [JsonIgnore]
+    public string? RequestId { get; internal set; }
+
     /// <summary>True only for <c>active</c>: the endpoint receives deliveries.</summary>
     [JsonIgnore]
     public bool IsActive => string.Equals(this.Status, WebhookEndpointStatuses.Active, StringComparison.Ordinal);
