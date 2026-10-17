@@ -354,8 +354,10 @@ public sealed class ChargeEventData
 
     /// <summary>
     /// The card the charge was placed on, as its brand and last four digits. Null when the
-    /// delivery has none.
+    /// delivery has none, or when <c>paymentMethod</c> is not an object. A field with an
+    /// unexpected type reads as null; <see cref="Raw"/> keeps the value as sent.
     /// </summary>
+    [JsonConverter(typeof(TolerantPaymentMethodConverter))]
     public ChargeEventPaymentMethod? PaymentMethod { get; set; }
 
     /// <summary>Your order reference, as sent on the charge.</summary>
@@ -413,4 +415,51 @@ public sealed class ChargeEventPaymentMethod
 
     /// <summary>Last four digits of the card.</summary>
     public string? Last4 { get; set; }
+}
+
+/// <summary>
+/// Reads <c>paymentMethod</c> so that an unexpected shape never fails a signed event: a value
+/// that is not an object reads as null, and a field that is not a string reads as null.
+/// </summary>
+internal sealed class TolerantPaymentMethodConverter : JsonConverter<ChargeEventPaymentMethod?>
+{
+    public override ChargeEventPaymentMethod? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        using var document = JsonDocument.ParseValue(ref reader);
+        var value = document.RootElement;
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var method = new ChargeEventPaymentMethod();
+        foreach (var property in value.EnumerateObject())
+        {
+            var text = property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString() : null;
+            if (string.Equals(property.Name, "brand", StringComparison.OrdinalIgnoreCase))
+            {
+                method.Brand = text;
+            }
+            else if (string.Equals(property.Name, "last4", StringComparison.OrdinalIgnoreCase))
+            {
+                method.Last4 = text;
+            }
+        }
+
+        return method;
+    }
+
+    public override void Write(Utf8JsonWriter writer, ChargeEventPaymentMethod? value, JsonSerializerOptions options)
+    {
+        if (value is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStartObject();
+        writer.WriteString("brand", value.Brand);
+        writer.WriteString("last4", value.Last4);
+        writer.WriteEndObject();
+    }
 }

@@ -24,8 +24,34 @@ public sealed class DominaiteClientOptions
     /// </remarks>
     public string? BaseUrl { get; set; }
 
-    /// <summary>The per-request timeout. Defaults to 45 seconds.</summary>
+    /// <summary>The timeout for one attempt. Defaults to 45 seconds.</summary>
+    /// <remarks>
+    /// The timeout applies to each attempt, not to the whole call. With retries, one call can wait
+    /// up to (<see cref="MaxRetries"/> + 1) x <see cref="Timeout"/>, plus the waits between
+    /// attempts.
+    /// </remarks>
     public TimeSpan Timeout { get; set; } = DefaultTimeout;
+
+    /// <summary>
+    /// How many times a failed call is sent again. Defaults to 2. Set 0 to send every call once.
+    /// A negative value fails construction with a <see cref="DominaiteValidationException"/>.
+    /// </summary>
+    /// <remarks>
+    /// Only calls that are safe to replay are retried: every GET, and every POST that carries an
+    /// idempotency key, except <see cref="DominaiteClient.CreateWebhookEndpointAsync"/>. Each
+    /// attempt sends the same path, body and idempotency key. Only a transport failure (a timeout,
+    /// a dropped connection, a 5xx with no typed meaning on the route) and
+    /// <c>PAYMENT_PROCESSING_UNAVAILABLE</c> are retried. A 429 is never retried: wait
+    /// <see cref="DominaiteRateLimitException.RetryAfter"/> yourself. Before retry n (from 0) the
+    /// client waits a random time between 0 and 500ms x 2^n, capped at 8 seconds.
+    /// </remarks>
+    public int MaxRetries { get; set; } = 2;
+
+    /// <summary>The wait between attempts. Tests replace it to run without real waits.</summary>
+    internal Func<TimeSpan, CancellationToken, Task>? Sleep { get; set; }
+
+    /// <summary>A random number in [0, 1) for the jitter. Tests replace it to pin the waits.</summary>
+    internal Func<double>? Random { get; set; }
 
     /// <summary>
     /// Appended to the SDK's User-Agent after one space, which helps when Dominaite support reads
@@ -37,8 +63,7 @@ public sealed class DominaiteClientOptions
 
     /// <summary>
     /// Where the SDK sends its warnings: a <c>Dominaite-Sdk-Notice</c> from the API (an old SDK
-    /// version, once per distinct notice), a retry in
-    /// <see cref="DominaiteClient.CreateCheckoutSessionWithRetryAsync"/>, and a ping clock skew
+    /// version, once per distinct notice), each retry of a call, and a ping clock skew
     /// over 60 seconds. Defaults to <see cref="System.Diagnostics.Trace.TraceWarning(string)"/>.
     /// </summary>
     /// <remarks>
@@ -73,13 +98,17 @@ public sealed class DominaiteClientOptions
 }
 
 /// <summary>
-/// How <see cref="DominaiteClient.CreateCheckoutSessionWithRetryAsync"/> backs off.
+/// How <see cref="DominaiteClient.CreateCheckoutSessionWithRetryAsync"/> backs off. Deprecated with
+/// that method: set <see cref="DominaiteClientOptions.MaxRetries"/> instead.
 /// </summary>
 public sealed class RetryOptions
 {
     /// <summary>Total attempts including the first.</summary>
     public int Attempts { get; set; } = 3;
 
-    /// <summary>The wait before the first retry. It doubles each attempt.</summary>
+    /// <summary>
+    /// The longest wait before the first retry. It doubles each attempt, capped at 8 seconds, and
+    /// each wait is a random time up to that ceiling.
+    /// </summary>
     public TimeSpan BaseDelay { get; set; } = TimeSpan.FromMilliseconds(500);
 }

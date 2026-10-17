@@ -86,7 +86,7 @@ catch (DominaiteAuthException error)
 }
 catch (DominaiteTransportException error)
 {
-    // Safe to retry with the SAME idempotency key - CreateCheckoutSessionWithRetryAsync does it.
+    // The client already retried it with the SAME idempotency key. Retry later with that key.
     Console.Error.WriteLine($"Temporarily unavailable: {error.Message}");
     return 4;
 }

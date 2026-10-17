@@ -31,7 +31,7 @@ public class ErrorCodeTests
             .Select(field => (string)field.GetRawConstantValue()!)];
 
     private static DominaiteClient ClientFor(MockServer server)
-        => new(KeyId, Secret, new DominaiteClientOptions { BaseUrl = server.BaseUrl, Timeout = TimeSpan.FromSeconds(10) });
+        => new(KeyId, Secret, new DominaiteClientOptions { BaseUrl = server.BaseUrl, Timeout = TimeSpan.FromSeconds(10), MaxRetries = 0 });
 
     private static ChargeRequest Charge() => new()
     {

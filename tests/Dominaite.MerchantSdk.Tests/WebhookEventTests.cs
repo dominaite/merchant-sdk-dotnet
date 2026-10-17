@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Xunit;
 
 namespace Dominaite.MerchantSdk.Tests;
@@ -309,6 +310,43 @@ public class WebhookEventTests
 
         Assert.Null(charge.PaymentMethod?.Brand);
         Assert.Null(charge.PaymentMethod?.Last4);
+    }
+
+    [Theory]
+    [InlineData("\"visa 4242\"", JsonValueKind.String)]
+    [InlineData("4242", JsonValueKind.Number)]
+    [InlineData("[\"visa\",\"4242\"]", JsonValueKind.Array)]
+    [InlineData("true", JsonValueKind.True)]
+    public void AChargeEventWhoseCardIsNotAnObjectStillParsesWithNoTypedCard(string paymentMethod, JsonValueKind sentKind)
+    {
+        var charge = Parse(WithPaymentMethod(paymentMethod)).Charge!;
+
+        Assert.Null(charge.PaymentMethod);
+        Assert.Equal("ch_44444444444444448444444444444444", charge.ChargeId);
+        Assert.Equal(990, charge.Amount);
+        Assert.Equal(sentKind, charge.Raw.GetProperty("paymentMethod").ValueKind);
+    }
+
+    [Theory]
+    [InlineData("{\"brand\":\"visa\",\"last4\":4242}", "visa", null)]
+    [InlineData("{\"brand\":{\"name\":\"visa\"},\"last4\":\"4242\"}", null, "4242")]
+    [InlineData("{\"brand\":[\"visa\"],\"last4\":[4,2,4,2]}", null, null)]
+    public void AChargeEventWithAWrongTypedCardFieldKeepsTheOtherField(string paymentMethod, string? brand, string? last4)
+    {
+        var charge = Parse(WithPaymentMethod(paymentMethod)).Charge!;
+
+        var method = Assert.IsType<ChargeEventPaymentMethod>(charge.PaymentMethod);
+        Assert.Equal(brand, method.Brand);
+        Assert.Equal(last4, method.Last4);
+        Assert.Equal(990, charge.Amount);
+        Assert.Equal(JsonValueKind.Object, charge.Raw.GetProperty("paymentMethod").ValueKind);
+    }
+
+    private static string WithPaymentMethod(string paymentMethod)
+    {
+        var body = OneOffChargeBody.Replace("{\"brand\":\"visa\",\"last4\":\"4242\"}", paymentMethod, StringComparison.Ordinal);
+        Assert.NotEqual(OneOffChargeBody, body);
+        return body;
     }
 
     [Fact]

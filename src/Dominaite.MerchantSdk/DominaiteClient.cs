@@ -94,6 +94,12 @@ public sealed class DominaiteClient : IDisposable
     private const int MaxRequestIdLength = 128;
     private const long ClockSkewWarningSeconds = 60;
 
+    /// <summary>The policy's base wait: the first retry waits up to this long.</summary>
+    private static readonly TimeSpan BaseRetryDelay = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>The longest single wait between two attempts.</summary>
+    private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(8);
+
     private const string KeyIdPrefix = "dmk_";
     private const string SecretPrefix = "dms_";
 
@@ -130,6 +136,9 @@ public sealed class DominaiteClient : IDisposable
     private readonly bool _ownsHttpClient;
     private readonly Action<string> _onWarning;
     private readonly Action<string>? _onDebug;
+    private readonly int _maxRetries;
+    private readonly Func<TimeSpan, CancellationToken, Task> _sleep;
+    private readonly Func<double> _random;
 
     /// <summary>The notice values this client already warned about, so each warns once.</summary>
     private readonly HashSet<string> _seenNotices = new(StringComparer.Ordinal);
@@ -176,6 +185,11 @@ public sealed class DominaiteClient : IDisposable
         RequireEncryptedTransport(baseUrl);
         options ??= new DominaiteClientOptions();
 
+        if (options.MaxRetries < 0)
+        {
+            throw new DominaiteValidationException("MaxRetries must not be negative");
+        }
+
         this._keyId = keyId;
         this._secret = secret;
         this.BaseUrl = baseUrl;
@@ -183,6 +197,9 @@ public sealed class DominaiteClient : IDisposable
         this.UserAgent = BuildUserAgent(options.UserAgentSuffix);
         this._onWarning = options.OnWarning ?? (message => Trace.TraceWarning(message));
         this._onDebug = options.OnDebug;
+        this._maxRetries = options.MaxRetries;
+        this._sleep = options.Sleep ?? Task.Delay;
+        this._random = options.Random ?? Random.Shared.NextDouble;
 
         if (options.HttpClient is not null)
         {
@@ -218,11 +235,18 @@ public sealed class DominaiteClient : IDisposable
     public async Task<PingResponse> PingAsync(CancellationToken cancellationToken = default)
     {
         // GET signs an EMPTY idempotency key and an EMPTY body.
-        var payload = await this.RequestAsync(HttpMethod.Get, PingPath, string.Empty, string.Empty, cancellationToken)
+        var ping = await this.CallAsync(
+                Call.Read(PingPath),
+                reply =>
+                {
+                    var payload = reply.ReadPayload();
+                    var parsed = Deserialize<PingResponse>(payload, "ping");
+                    parsed.Raw = payload;
+                    parsed.RequestId = reply.RequestId;
+                    return parsed;
+                },
+                cancellationToken)
             .ConfigureAwait(false);
-
-        var ping = Deserialize<PingResponse>(payload, "ping");
-        ping.Raw = payload;
 
         if (ping.ClockSkewSeconds is > ClockSkewWarningSeconds or < -ClockSkewWarningSeconds)
         {
@@ -250,12 +274,18 @@ public sealed class DominaiteClient : IDisposable
     public async Task<IntegrationContract> GetIntegrationContractAsync(CancellationToken cancellationToken = default)
     {
         // GET signs an EMPTY idempotency key and an EMPTY body.
-        var reply = await this.SendAsync(HttpMethod.Get, IntegrationContractPath, string.Empty, string.Empty, cancellationToken)
+        return await this.CallAsync(
+                Call.Read(IntegrationContractPath),
+                reply =>
+                {
+                    var data = reply.ReadObject("integration contract");
+                    var contract = Deserialize<IntegrationContract>(data, "integration contract");
+                    contract.Raw = data;
+                    contract.RequestId = reply.RequestId;
+                    return contract;
+                },
+                cancellationToken)
             .ConfigureAwait(false);
-        var data = reply.ReadObject("integration contract");
-        var contract = Deserialize<IntegrationContract>(data, "integration contract");
-        contract.Raw = data;
-        return contract;
     }
 
     /// <summary>
@@ -280,31 +310,42 @@ public sealed class DominaiteClient : IDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        return await this.CreateCheckoutSessionCoreAsync(request, null, cancellationToken).ConfigureAwait(false);
+    }
 
+    /// <summary>
+    /// Creates a session under <paramref name="retries"/>, or under the client's own policy when
+    /// it is null.
+    /// </summary>
+    private async Task<CheckoutSession> CreateCheckoutSessionCoreAsync(
+        CheckoutSessionRequest request,
+        Retries? retries,
+        CancellationToken cancellationToken)
+    {
         var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
         var body = SerializeBody(request);
 
-        ApiReply reply;
-        try
-        {
-            reply = await this.SendAsync(HttpMethod.Post, SessionsPath, body, idempotencyKey, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (DominaiteException error)
-        {
-            error.IdempotencyKey = idempotencyKey;
-            throw;
-        }
+        return await this.CallAsync(
+                Call.Write(HttpMethod.Post, SessionsPath, body, idempotencyKey),
+                ReadCheckoutSession,
+                cancellationToken,
+                retries)
+            .ConfigureAwait(false);
+    }
 
+    /// <summary>
+    /// The session in a create answer, or the error the answer stands for: a storefront refusal, a
+    /// session refusal or the generic rejection.
+    /// </summary>
+    private static CheckoutSession ReadCheckoutSession(ApiReply reply)
+    {
         // The storefront codes arrive as a real HTTP 409 or 400, and a 400 would otherwise read as
         // one more validation error. They are configuration, not input, so they get their own type.
         if (reply.Status >= 400)
         {
-            var rejection = reply.Status < 500 && reply.StorefrontRefusal() is { } storefront
+            throw reply.Status < 500 && reply.StorefrontRefusal() is { } storefront
                 ? storefront
                 : reply.Rejection();
-            rejection.IdempotencyKey = idempotencyKey;
-            throw rejection;
         }
 
         var payload = reply.Payload;
@@ -321,6 +362,7 @@ public sealed class DominaiteClient : IDisposable
         {
             var session = Deserialize<CheckoutSession>(checkout, "checkout object");
             session.Raw = checkout.Clone();
+            session.RequestId = reply.RequestId;
             return session;
         }
 
@@ -328,7 +370,6 @@ public sealed class DominaiteClient : IDisposable
         // the same storefront problem, so it is still the same exception.
         if (reply.StorefrontRefusal() is { } replayStorefront)
         {
-            replayStorefront.IdempotencyKey = idempotencyKey;
             throw replayStorefront;
         }
 
@@ -339,33 +380,32 @@ public sealed class DominaiteClient : IDisposable
             StringField(payload, "errorCode") ?? "UNKNOWN",
             StringField(payload, "errorMessage") ?? "The checkout session was refused.",
             StringField(payload, "transactionId"),
-            payload)
-        {
-            IdempotencyKey = idempotencyKey,
-        };
+            payload);
     }
 
     /// <summary>
     /// Creates a session, retrying transport failures and <c>PAYMENT_PROCESSING_UNAVAILABLE</c>,
-    /// with THE SAME idempotency key across every attempt.
+    /// with THE SAME idempotency key across every attempt. Deprecated: since 0.7.0
+    /// <see cref="CreateCheckoutSessionAsync"/> retries the same way under
+    /// <see cref="DominaiteClientOptions.MaxRetries"/>.
     /// </summary>
     /// <remarks>
+    /// This is now a thin wrapper over the client's retry policy, with its own attempt count and
+    /// base wait in place of the client's. It does not stack on top of the client's own retries.
     /// Reusing the key is what makes the retry safe: a transport failure leaves you not knowing
     /// whether the request landed, and a retried key never opens a second payment. If the first
     /// attempt did land and its session is still open, the retry returns that ORIGINAL session.
     /// If it has moved on, the retry comes back as a replay refusal (<c>ALREADY_PROCESSED</c>,
     /// <c>PRIOR_ATTEMPT_FAILED</c>, <c>DUPLICATE_REQUEST</c>) naming that transaction, which you
-    /// read back with <see cref="GetStatusAsync"/>. A fresh key per attempt would be exactly the
-    /// double-charge bug this method exists to prevent, so every attempt sends the request's own
-    /// key, which is required.
-    /// <c>PAYMENT_PROCESSING_UNAVAILABLE</c> is retried too: it arrives as a refusal, but card
-    /// payments come back on their own and nothing was created. Every other refusal, storefront
-    /// refusals, and authentication and permission failures are thrown immediately: they will not
-    /// change. A rate limit (HTTP 429) is thrown immediately too: wait
+    /// read back with <see cref="GetStatusAsync"/>. Every other refusal, storefront refusals,
+    /// and authentication and permission failures are thrown immediately: they will not change.
+    /// A rate limit (HTTP 429) is thrown immediately too: wait
     /// <see cref="DominaiteRateLimitException.RetryAfter"/>, then call again with the same key.
     /// </remarks>
     /// <param name="request">The session parameters.</param>
-    /// <param name="options">Attempts and backoff. Defaults to 3 attempts, 500ms doubling.</param>
+    /// <param name="options">
+    /// Attempts and backoff. Defaults to 3 attempts; each wait is random, up to 500ms doubling.
+    /// </param>
     /// <param name="cancellationToken">Cancels the call and the waits between attempts.</param>
     /// <returns>The created session.</returns>
     public async Task<CheckoutSession> CreateCheckoutSessionWithRetryAsync(
@@ -381,31 +421,11 @@ public sealed class DominaiteClient : IDisposable
             throw new DominaiteValidationException("Attempts must be at least 1");
         }
 
-        // Checked once, up front, so a missing key fails before the first attempt.
-        IdempotencyKeys.Validate(request.IdempotencyKey);
-
-        DominaiteException? lastError = null;
-        for (var attempt = 0; attempt < options.Attempts; attempt++)
-        {
-            try
-            {
-                return await this.CreateCheckoutSessionAsync(request, cancellationToken).ConfigureAwait(false);
-            }
-            catch (DominaiteException error) when (error.IsRetryable)
-            {
-                lastError = error;
-                if (attempt + 1 < options.Attempts)
-                {
-                    this.Warn(
-                        $"dominaite-dotnet: retrying CreateCheckoutSessionWithRetryAsync after {RetryReason(error)} "
-                        + $"(attempt {attempt + 2} of {options.Attempts})");
-                    var delay = options.BaseDelay * Math.Pow(2, Math.Min(attempt, 16));
-                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-                }
-            }
-        }
-
-        throw lastError ?? new DominaiteTransportException("Retrying gave up.");
+        return await this.CreateCheckoutSessionCoreAsync(
+                request,
+                new Retries(nameof(this.CreateCheckoutSessionWithRetryAsync), options.Attempts - 1, options.BaseDelay),
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
@@ -436,12 +456,18 @@ public sealed class DominaiteClient : IDisposable
         // GET signs an EMPTY idempotency key and an EMPTY body, and sends no Idempotency-Key
         // header.
         var path = $"{SessionsPath}/{normalized}";
-        var payload = await this.RequestAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
+        return await this.CallAsync(
+                Call.Read(path),
+                reply =>
+                {
+                    var payload = reply.ReadPayload();
+                    var status = Deserialize<CheckoutStatus>(payload, "status");
+                    status.Raw = payload;
+                    status.RequestId = reply.RequestId;
+                    return status;
+                },
+                cancellationToken)
             .ConfigureAwait(false);
-
-        var status = Deserialize<CheckoutStatus>(payload, "status");
-        status.Raw = payload;
-        return status;
     }
 
     /// <summary>
@@ -486,18 +512,13 @@ public sealed class DominaiteClient : IDisposable
         var body = SerializeBody(request);
         var path = $"{PaymentMethodsPath}/{id}/charges";
 
-        ApiReply reply;
-        try
-        {
-            reply = await this.SendAsync(HttpMethod.Post, path, body, idempotencyKey, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (DominaiteException error)
-        {
-            error.IdempotencyKey = idempotencyKey;
-            throw;
-        }
+        return await this.CallAsync(Call.Write(HttpMethod.Post, path, body, idempotencyKey), ReadCharge, cancellationToken)
+            .ConfigureAwait(false);
+    }
 
+    /// <summary>The charge in a charge answer, a 402 decline included, or the error the answer stands for.</summary>
+    private static PaymentMethodCharge ReadCharge(ApiReply reply)
+    {
         // 201 (200 on a durable replay): the charge was placed, whatever its status. 402: the
         // provider declined; the envelope says success=false but the charge is right there,
         // status failed (its decline class can be null), so it is a result, not an exception.
@@ -517,21 +538,13 @@ public sealed class DominaiteClient : IDisposable
                     code,
                     reply.ErrorMessage ?? "The charge was refused.",
                     charge,
-                    reply.Envelope)
-                {
-                    IdempotencyKey = idempotencyKey,
-                };
+                    reply.Envelope);
             }
 
-            var rejection = reply.Rejection();
-            rejection.IdempotencyKey = idempotencyKey;
-            throw rejection;
+            throw reply.Rejection();
         }
 
-        throw new DominaiteApiException(reply.Status, null, "The Dominaite API answered the charge without a charge body.")
-        {
-            IdempotencyKey = idempotencyKey,
-        };
+        throw new DominaiteApiException(reply.Status, null, "The Dominaite API answered the charge without a charge body.");
     }
 
     /// <summary>
@@ -563,24 +576,29 @@ public sealed class DominaiteClient : IDisposable
 
         // DELETE signs an EMPTY idempotency key and an EMPTY body, and sends no Idempotency-Key
         // header, exactly like GET.
-        var reply = await this.SendAsync(HttpMethod.Delete, path, string.Empty, string.Empty, cancellationToken)
+        await this.CallAsync(
+                Call.Delete(path),
+                reply =>
+                {
+                    if (reply.Status < 400)
+                    {
+                        return true;
+                    }
+
+                    var code = reply.ErrorCode;
+                    if (code is not null && IsRouteOutcome(reply.Status, code, RevokeErrorCodes.All, notFoundIsOutcome: false))
+                    {
+                        throw new DominaiteRevokeException(
+                            reply.Status,
+                            code,
+                            reply.ErrorMessage ?? "The revoke was refused.",
+                            reply.Envelope);
+                    }
+
+                    throw reply.Rejection();
+                },
+                cancellationToken)
             .ConfigureAwait(false);
-        if (reply.Status < 400)
-        {
-            return;
-        }
-
-        var code = reply.ErrorCode;
-        if (code is not null && IsRouteOutcome(reply.Status, code, RevokeErrorCodes.All, notFoundIsOutcome: false))
-        {
-            throw new DominaiteRevokeException(
-                reply.Status,
-                code,
-                reply.ErrorMessage ?? "The revoke was refused.",
-                reply.Envelope);
-        }
-
-        throw reply.Rejection();
     }
 
     /// <summary>
@@ -623,27 +641,8 @@ public sealed class DominaiteClient : IDisposable
         var body = SerializeBody(request);
         var path = $"{PaymentsPath}/{id}/refunds";
 
-        ApiReply reply;
-        try
-        {
-            reply = await this.SendAsync(HttpMethod.Post, path, body, idempotencyKey, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (DominaiteException error)
-        {
-            error.IdempotencyKey = idempotencyKey;
-            throw;
-        }
-
-        try
-        {
-            return reply.ReadRefund();
-        }
-        catch (DominaiteException error)
-        {
-            error.IdempotencyKey = idempotencyKey;
-            throw;
-        }
+        return await this.CallAsync(Call.Write(HttpMethod.Post, path, body, idempotencyKey), reply => reply.ReadRefund(), cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
@@ -678,9 +677,8 @@ public sealed class DominaiteClient : IDisposable
 
         // GET signs an EMPTY idempotency key and an EMPTY body, and sends no Idempotency-Key
         // header.
-        var reply = await this.SendAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
+        return await this.CallAsync(Call.Read(path), reply => reply.ReadRefund(), cancellationToken)
             .ConfigureAwait(false);
-        return reply.ReadRefund();
     }
 
     /// <summary>
@@ -711,9 +709,8 @@ public sealed class DominaiteClient : IDisposable
 
         // GET signs an EMPTY idempotency key and an EMPTY body, and sends no Idempotency-Key
         // header.
-        var reply = await this.SendAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
+        return await this.CallAsync(Call.Read(path), reply => reply.ReadRefundList(), cancellationToken)
             .ConfigureAwait(false);
-        return reply.ReadRefundList();
     }
 
     /// <summary>
@@ -751,9 +748,11 @@ public sealed class DominaiteClient : IDisposable
 
         var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
         var body = SerializeWithExtra(request, request.Extra);
-        var data = await this.CreateAsync(PlansPath, body, idempotencyKey, "plan", cancellationToken)
+        return await this.CallAsync(
+                Call.Write(HttpMethod.Post, PlansPath, body, idempotencyKey),
+                reply => ToPlan(reply.ReadObject("plan"), reply.RequestId),
+                cancellationToken)
             .ConfigureAwait(false);
-        return ToPlan(data);
     }
 
     /// <summary>
@@ -769,9 +768,11 @@ public sealed class DominaiteClient : IDisposable
     /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
     public async Task<IReadOnlyList<Plan>> ListPlansAsync(CancellationToken cancellationToken = default)
     {
-        var reply = await this.SendAsync(HttpMethod.Get, PlansPath, string.Empty, string.Empty, cancellationToken)
+        return await this.CallAsync<IReadOnlyList<Plan>>(
+                Call.Read(PlansPath),
+                reply => [.. reply.ReadArray("plan list").EnumerateArray().Select(item => ToPlan(item, reply.RequestId))],
+                cancellationToken)
             .ConfigureAwait(false);
-        return [.. reply.ReadArray("plan list").EnumerateArray().Select(ToPlan)];
     }
 
     /// <summary>Reads one plan.</summary>
@@ -791,9 +792,8 @@ public sealed class DominaiteClient : IDisposable
         ArgumentNullException.ThrowIfNull(planId);
 
         var path = $"{PlansPath}/{NormalizeHandle(planId, "planId must be the Plan.Id from CreatePlanAsync")}";
-        var reply = await this.SendAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
+        return await this.CallAsync(Call.Read(path), reply => ToPlan(reply.ReadObject("plan"), reply.RequestId), cancellationToken)
             .ConfigureAwait(false);
-        return ToPlan(reply.ReadObject("plan"));
     }
 
     /// <summary>
@@ -832,9 +832,11 @@ public sealed class DominaiteClient : IDisposable
 
         // The gateway takes no Idempotency-Key on PATCH, so the SDK signs an empty one and sends
         // no header.
-        var reply = await this.SendAsync(HttpMethod.Patch, path, body, string.Empty, cancellationToken)
+        return await this.CallAsync(
+                Call.Write(HttpMethod.Patch, path, body, string.Empty),
+                reply => ToPlan(reply.ReadObject("plan"), reply.RequestId),
+                cancellationToken)
             .ConfigureAwait(false);
-        return ToPlan(reply.ReadObject("plan"));
     }
 
     /// <summary>
@@ -861,9 +863,8 @@ public sealed class DominaiteClient : IDisposable
         ArgumentNullException.ThrowIfNull(planId);
 
         var path = $"{PlansPath}/{NormalizeHandle(planId, "planId must be the Plan.Id from CreatePlanAsync")}";
-        var reply = await this.SendAsync(HttpMethod.Delete, path, string.Empty, string.Empty, cancellationToken)
+        await this.CallAsync(Call.Delete(path), ReadNothing, cancellationToken)
             .ConfigureAwait(false);
-        reply.ReadNothing();
     }
 
     /// <summary>
@@ -903,9 +904,11 @@ public sealed class DominaiteClient : IDisposable
 
         var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
         var body = SerializeWithExtra(request, request.Extra);
-        var data = await this.CreateAsync(AgreementsPath, body, idempotencyKey, "agreement", cancellationToken)
+        return await this.CallAsync(
+                Call.Write(HttpMethod.Post, AgreementsPath, body, idempotencyKey),
+                reply => ToAgreement(reply.ReadObject("agreement"), reply.RequestId),
+                cancellationToken)
             .ConfigureAwait(false);
-        return ToAgreement(data);
     }
 
     /// <summary>Reads one agreement: its status, its next charge and why it is past due.</summary>
@@ -925,9 +928,11 @@ public sealed class DominaiteClient : IDisposable
         ArgumentNullException.ThrowIfNull(agreementId);
 
         var path = $"{AgreementsPath}/{NormalizeHandle(agreementId, "agreementId must be the Agreement.Id from CreateAgreementAsync")}";
-        var reply = await this.SendAsync(HttpMethod.Get, path, string.Empty, string.Empty, cancellationToken)
+        return await this.CallAsync(
+                Call.Read(path),
+                reply => ToAgreement(reply.ReadObject("agreement"), reply.RequestId),
+                cancellationToken)
             .ConfigureAwait(false);
-        return ToAgreement(reply.ReadObject("agreement"));
     }
 
     /// <summary>Cancels an agreement: the platform charges it no more.</summary>
@@ -952,9 +957,8 @@ public sealed class DominaiteClient : IDisposable
         ArgumentNullException.ThrowIfNull(agreementId);
 
         var path = $"{AgreementsPath}/{NormalizeHandle(agreementId, "agreementId must be the Agreement.Id from CreateAgreementAsync")}";
-        var reply = await this.SendAsync(HttpMethod.Delete, path, string.Empty, string.Empty, cancellationToken)
+        await this.CallAsync(Call.Delete(path), ReadNothing, cancellationToken)
             .ConfigureAwait(false);
-        reply.ReadNothing();
     }
 
     /// <summary>
@@ -962,12 +966,14 @@ public sealed class DominaiteClient : IDisposable
     /// with the <c>webhooks:manage</c> scope.
     /// </summary>
     /// <remarks>
-    /// Store <see cref="WebhookEndpoint.Secret"/> from this answer: no other answer has it. A
-    /// retry with the same key returns the same endpoint without the secret. If you lost the
-    /// secret, delete the endpoint and register it again with a new key. On
+    /// Store <see cref="WebhookEndpoint.Secret"/> from this answer: no other answer has it. After
+    /// a timeout, retry with the same key. If the answer has no secret, delete that endpoint and
+    /// create it again with a new key. Do the same if you lose the secret later. On
     /// <c>WEBHOOK_ALREADY_REGISTERED</c> the key was used for an endpoint that still exists, and
     /// its id is in <c>error.params.webhookId</c> of
-    /// <see cref="DominaiteApiException.RawResult"/>.
+    /// <see cref="DominaiteApiException.RawResult"/>. The client's retry policy never retries this
+    /// call, whatever <see cref="DominaiteClientOptions.MaxRetries"/> says: a replay after a lost
+    /// answer would come back without the secret.
     /// </remarks>
     /// <param name="request">
     /// The endpoint. <see cref="CreateWebhookEndpointRequest.IdempotencyKey"/> is required.
@@ -994,9 +1000,13 @@ public sealed class DominaiteClient : IDisposable
 
         var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
         var body = SerializeWithExtra(request, request.Extra);
-        var data = await this.CreateAsync(WebhooksPath, body, idempotencyKey, "webhook endpoint", cancellationToken)
+        return await this.CallAsync(
+                // Never retried: only the first answer carries the signing secret, so a replay
+                // after a lost answer would hand back an endpoint without one.
+                Call.Write(HttpMethod.Post, WebhooksPath, body, idempotencyKey) with { Retryable = false },
+                reply => ToWebhookEndpoint(reply.ReadObject("webhook endpoint"), reply.RequestId),
+                cancellationToken)
             .ConfigureAwait(false);
-        return ToWebhookEndpoint(data);
     }
 
     /// <summary>
@@ -1013,9 +1023,11 @@ public sealed class DominaiteClient : IDisposable
     /// <exception cref="DominaiteTransportException">Network failure or 5xx; retry.</exception>
     public async Task<IReadOnlyList<WebhookEndpoint>> ListWebhookEndpointsAsync(CancellationToken cancellationToken = default)
     {
-        var reply = await this.SendAsync(HttpMethod.Get, WebhooksPath, string.Empty, string.Empty, cancellationToken)
+        return await this.CallAsync<IReadOnlyList<WebhookEndpoint>>(
+                Call.Read(WebhooksPath),
+                reply => [.. reply.ReadArray("webhook endpoint list").EnumerateArray().Select(item => ToWebhookEndpoint(item, reply.RequestId))],
+                cancellationToken)
             .ConfigureAwait(false);
-        return [.. reply.ReadArray("webhook endpoint list").EnumerateArray().Select(ToWebhookEndpoint)];
     }
 
     /// <summary>
@@ -1042,9 +1054,8 @@ public sealed class DominaiteClient : IDisposable
         ArgumentNullException.ThrowIfNull(webhookId);
 
         var path = $"{WebhooksPath}/{NormalizeWebhookId(webhookId)}";
-        var reply = await this.SendAsync(HttpMethod.Delete, path, string.Empty, string.Empty, cancellationToken)
+        await this.CallAsync(Call.Delete(path), ReadNothing, cancellationToken)
             .ConfigureAwait(false);
-        reply.ReadNothing();
     }
 
     /// <summary>
@@ -1075,28 +1086,28 @@ public sealed class DominaiteClient : IDisposable
 
         // GET signs the bare path with an EMPTY idempotency key and an EMPTY body. The query is
         // in the URL only.
-        var reply = await this.SendRequestAsync(
-                HttpMethod.Get,
-                TransactionsPath,
-                TransactionQuery(request),
-                string.Empty,
-                string.Empty,
+        return await this.CallAsync(
+                Call.Read(TransactionsPath, TransactionQuery(request)),
+                reply =>
+                {
+                    var data = reply.ReadObject("transaction page");
+                    var page = Deserialize<TransactionPage>(data, "transaction page");
+                    page.Raw = data;
+                    page.RequestId = reply.RequestId;
+                    if (data.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+                    {
+                        page.Items = [.. items.EnumerateArray().Select(item =>
+                        {
+                            var row = Deserialize<TransactionItem>(item, "transaction");
+                            row.Raw = item;
+                            return row;
+                        })];
+                    }
+
+                    return page;
+                },
                 cancellationToken)
             .ConfigureAwait(false);
-        var data = reply.ReadObject("transaction page");
-        var page = Deserialize<TransactionPage>(data, "transaction page");
-        page.Raw = data;
-        if (data.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
-        {
-            page.Items = [.. items.EnumerateArray().Select(item =>
-            {
-                var row = Deserialize<TransactionItem>(item, "transaction");
-                row.Raw = item;
-                return row;
-            })];
-        }
-
-        return page;
     }
 
     /// <summary>Releases the HttpClient this instance created for itself.</summary>
@@ -1117,49 +1128,80 @@ public sealed class DominaiteClient : IDisposable
         => $"DominaiteClient {{ KeyId = {this._keyId}, BaseUrl = {this.BaseUrl}, Secret = [REDACTED] }}";
 
     /// <summary>
-    /// Signs and sends one call, and maps the response onto the error taxonomy:
-    /// <see cref="SendAsync"/> plus the generic rejection for any 4xx or 5xx. The unwrapped
-    /// <c>data</c> comes back on success (an empty object for a 204). The body and the idempotency
-    /// key are both empty for GET and DELETE.
+    /// Sends one call under the retry policy and reads its answer with <paramref name="read"/>.
+    /// Every error leaves with the call's idempotency key and the answer's request id.
     /// </summary>
-    private async Task<JsonElement> RequestAsync(
-        HttpMethod method,
-        string path,
-        string body,
-        string idempotencyKey,
-        CancellationToken cancellationToken)
+    /// <remarks>
+    /// Only a call that can be replayed safely is retried: a GET, and a POST that carries an
+    /// idempotency key. Each attempt sends the same path, body and key, with a fresh timestamp
+    /// and so a fresh signature. Only a transport failure (a timeout, a dropped connection, a 5xx
+    /// with no typed meaning on the route) and <c>PAYMENT_PROCESSING_UNAVAILABLE</c> are retried.
+    /// A 429 never is: its <see cref="DominaiteRateLimitException.RetryAfter"/> is the caller's
+    /// to honor.
+    /// </remarks>
+    private async Task<T> CallAsync<T>(
+        Call call,
+        Func<ApiReply, T> read,
+        CancellationToken cancellationToken,
+        Retries? retries = null)
     {
-        var reply = await this.SendAsync(method, path, body, idempotencyKey, cancellationToken).ConfigureAwait(false);
-        if (reply.Status >= 400)
+        var policy = retries ?? new Retries($"{call.Method.Method} {call.Path}", this._maxRetries, BaseRetryDelay);
+        var allowed = call.Retryable ? policy.Max : 0;
+        for (var attempt = 0; ; attempt++)
         {
-            throw reply.Rejection();
+            try
+            {
+                var reply = await this.SendRequestAsync(call.Method, call.Path, call.Query, call.Body, call.IdempotencyKey, cancellationToken)
+                    .ConfigureAwait(false);
+                try
+                {
+                    return read(reply);
+                }
+                catch (DominaiteException error)
+                {
+                    error.RequestId ??= reply.RequestId;
+                    throw;
+                }
+            }
+            catch (DominaiteException error) when (attempt < allowed && IsAutoRetried(error))
+            {
+                this.Warn(
+                    $"dominaite-dotnet: retrying {policy.Operation} after {RetryReason(error)} "
+                    + $"(attempt {attempt + 2} of {allowed + 1})");
+                await this._sleep(this.RetryDelay(attempt, policy.BaseDelay), cancellationToken).ConfigureAwait(false);
+            }
+            catch (DominaiteException error) when (call.IdempotencyKey.Length > 0)
+            {
+                error.IdempotencyKey ??= call.IdempotencyKey;
+                throw;
+            }
         }
+    }
 
-        return reply.Payload;
+    /// <summary>Reads a bodiless answer: true on a success, else the generic rejection.</summary>
+    private static bool ReadNothing(ApiReply reply)
+    {
+        reply.ReadNothing();
+        return true;
     }
 
     /// <summary>
-    /// Sends a create call with its idempotency key and returns the <c>data</c> object. Every error
-    /// carries the key, so the caller can retry with it.
+    /// The errors the policy retries: a transport failure, or <c>PAYMENT_PROCESSING_UNAVAILABLE</c>.
+    /// The coded charge 5xx outcomes (<c>CHARGE_OUTCOME_UNKNOWN</c>, <c>CHARGE_FAILED</c>,
+    /// <c>PAYMENT_METHOD_CHARGES_DISABLED</c>) are answers, not outages, so they are not retried.
     /// </summary>
-    private async Task<JsonElement> CreateAsync(
-        string path,
-        string body,
-        string idempotencyKey,
-        string what,
-        CancellationToken cancellationToken)
+    private static bool IsAutoRetried(DominaiteException error)
+        => error is DominaiteTransportException
+            || string.Equals(error.Code, ErrorCodes.PaymentProcessingUnavailable, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Full jitter: a random wait between zero and <paramref name="baseDelay"/> x 2^attempt,
+    /// capped at <see cref="MaxRetryDelay"/>.
+    /// </summary>
+    private TimeSpan RetryDelay(int attempt, TimeSpan baseDelay)
     {
-        try
-        {
-            var reply = await this.SendAsync(HttpMethod.Post, path, body, idempotencyKey, cancellationToken)
-                .ConfigureAwait(false);
-            return reply.ReadObject(what);
-        }
-        catch (DominaiteException error)
-        {
-            error.IdempotencyKey = idempotencyKey;
-            throw;
-        }
+        var ceiling = Math.Min(MaxRetryDelay.TotalMilliseconds, baseDelay.TotalMilliseconds * Math.Pow(2, Math.Min(attempt, 30)));
+        return TimeSpan.FromMilliseconds(this._random() * ceiling);
     }
 
     /// <summary>
@@ -1170,20 +1212,9 @@ public sealed class DominaiteClient : IDisposable
     /// 429 with its <c>Retry-After</c>, and a body that is not a JSON object (a 5xx of that kind
     /// is a retryable transport failure; anything else is an API error). Every other status comes back as a reply, so the payment
     /// method routes can read a 402 decline or a coded 502 as the typed answers they are, while
-    /// <see cref="RequestAsync"/> rejects them generically.
+    /// <see cref="ApiReply.Rejection"/> rejects them generically. The query goes into the URL
+    /// only: the signed path never has one.
     /// </remarks>
-    private Task<ApiReply> SendAsync(
-        HttpMethod method,
-        string path,
-        string body,
-        string idempotencyKey,
-        CancellationToken cancellationToken)
-        => this.SendRequestAsync(method, path, string.Empty, body, idempotencyKey, cancellationToken);
-
-    /// <summary>
-    /// What <see cref="SendAsync"/> does, with a query string. The query goes into the URL only:
-    /// the signed path never has one.
-    /// </summary>
     private async Task<ApiReply> SendRequestAsync(
         HttpMethod method,
         string path,
@@ -1282,63 +1313,103 @@ public sealed class DominaiteClient : IDisposable
         using (response)
         {
             var status = (int)response.StatusCode;
-            answered(status, FirstHeader(response, RequestIdHeader));
-
-            // Read on every answer, errors included: an old SDK must hear it is old even when the
-            // call it made failed.
-            this.ReadNotice(FirstHeader(response, NoticeHeader));
-
-            // A 3xx is not a protocol detail here, it is a red flag: the API never redirects, and
-            // the handler did not follow it. Hard error, never retried.
-            if (status is >= 300 and < 400)
-            {
-                throw new DominaiteApiException(
-                    status,
-                    null,
-                    "The Dominaite API returned an unexpected redirect response; the Dominaite API never redirects.");
-            }
-
-            // A revoke answers 204 with no body, and no body is not a parse failure.
-            if (status == (int)HttpStatusCode.NoContent)
-            {
-                return new ApiReply(status, EmptyPayload);
-            }
-
-            string raw;
+            var headerId = CleanRequestId(FirstHeader(response, RequestIdHeader));
+            answered(status, headerId);
             try
             {
-                raw = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                return await this.ReadReplyAsync(response, status, headerId, answered, cancellationToken).ConfigureAwait(false);
             }
-            catch (HttpRequestException error)
+            catch (DominaiteException error)
             {
-                throw new DominaiteTransportException(
-                    $"Could not read the Dominaite API response: {error.Message}",
-                    innerException: error);
+                error.RequestId ??= headerId;
+                throw;
             }
-
-            // A 429 means the same thing whoever sent it, the API or an edge in front of it, so a
-            // body that is not the envelope does not make it a different error.
-            if (status == (int)HttpStatusCode.TooManyRequests)
-            {
-                var retryAfter = ReadRetryAfter(response.Headers.RetryAfter);
-                throw new ApiReply(status, TryParseObject(raw) ?? EmptyPayload, retryAfter).Rejection();
-            }
-
-            var reply = new ApiReply(status, ParseEnvelope(status, raw));
-
-            // Credentials and permissions are refused the same way on every route.
-            if (status is 401 or 403)
-            {
-                throw reply.Rejection();
-            }
-
-            return reply;
         }
+    }
+
+    /// <summary>
+    /// Reads one response into an <see cref="ApiReply"/>, or throws what no route can use. The
+    /// request id is the header when there is one, else the body's <c>metadata.requestId</c>.
+    /// </summary>
+    private async Task<ApiReply> ReadReplyAsync(
+        HttpResponseMessage response,
+        int status,
+        string? headerId,
+        Action<int, string?> answered,
+        CancellationToken cancellationToken)
+    {
+        // Read on every answer, errors included: an old SDK must hear it is old even when the
+        // call it made failed.
+        this.ReadNotice(FirstHeader(response, NoticeHeader));
+
+        // A 3xx is not a protocol detail here, it is a red flag: the API never redirects, and
+        // the handler did not follow it. Hard error, never retried.
+        if (status is >= 300 and < 400)
+        {
+            throw new DominaiteApiException(
+                status,
+                null,
+                "The Dominaite API returned an unexpected redirect response; the Dominaite API never redirects.");
+        }
+
+        // A revoke answers 204 with no body, and no body is not a parse failure.
+        if (status == (int)HttpStatusCode.NoContent)
+        {
+            return new ApiReply(status, EmptyPayload, headerId);
+        }
+
+        string raw;
+        try
+        {
+            raw = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (HttpRequestException error)
+        {
+            throw new DominaiteTransportException(
+                $"Could not read the Dominaite API response: {error.Message}",
+                innerException: error);
+        }
+
+        // A 429 means the same thing whoever sent it, the API or an edge in front of it, so a
+        // body that is not the envelope does not make it a different error.
+        if (status == (int)HttpStatusCode.TooManyRequests)
+        {
+            var retryAfter = ReadRetryAfter(response.Headers.RetryAfter);
+            throw new ApiReply(status, TryParseObject(raw) ?? EmptyPayload, headerId, retryAfter).Rejection();
+        }
+
+        var reply = new ApiReply(status, ParseEnvelope(status, raw), headerId);
+
+        // The debug line gets the body's id when the header had none.
+        if (headerId is null && reply.RequestId is not null)
+        {
+            answered(status, reply.RequestId);
+        }
+
+        // Credentials and permissions are refused the same way on every route.
+        if (status is 401 or 403)
+        {
+            throw reply.Rejection();
+        }
+
+        return reply;
     }
 
     /// <summary>The first value of a response header, or null.</summary>
     private static string? FirstHeader(HttpResponseMessage response, string name)
         => response.Headers.TryGetValues(name, out var values) ? values.FirstOrDefault() : null;
+
+    /// <summary>A request id cut to its maximum length and cleaned of control characters, or null when nothing is left.</summary>
+    private static string? CleanRequestId(string? value)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        var cleaned = Clean(value, MaxRequestIdLength);
+        return cleaned.Length > 0 ? cleaned : null;
+    }
 
     /// <summary>
     /// Warns once per distinct <c>Dominaite-Sdk-Notice</c> value. A missing header is a no-op, so
@@ -1439,10 +1510,9 @@ public sealed class DominaiteClient : IDisposable
             .Append(status?.ToString(CultureInfo.InvariantCulture) ?? "error").Append(' ')
             .Append(elapsed.ToString(CultureInfo.InvariantCulture)).Append("ms");
 
-        var id = requestId is null ? string.Empty : Clean(requestId, MaxRequestIdLength);
-        if (id.Length > 0)
+        if (requestId is not null)
         {
-            line.Append(" request_id=").Append(id);
+            line.Append(" request_id=").Append(requestId);
         }
 
         if (idempotencyKey.Length > 0)
@@ -1597,7 +1667,7 @@ public sealed class DominaiteClient : IDisposable
     /// coded 5xx is the route's own outcome only when the code is in its vocabulary; any other 5xx
     /// (a middleware <c>INTERNAL_ERROR</c>, say) is a retryable transport failure that keeps its
     /// code. Credentials (401), permissions (403) and limits (429) never get here:
-    /// <see cref="SendAsync"/> throws them first.
+    /// <see cref="SendRequestAsync"/> throws them first.
     /// </remarks>
     private static bool IsRouteOutcome(int status, string code, IReadOnlyList<string> vocabulary, bool notFoundIsOutcome)
         => status switch
@@ -1607,6 +1677,31 @@ public sealed class DominaiteClient : IDisposable
             >= 500 => vocabulary.Contains(code, StringComparer.Ordinal),
             _ => true,
         };
+
+    /// <summary>
+    /// One call as it gets signed and sent: method, signed path, query, body and idempotency key,
+    /// and whether the retry policy may send it again.
+    /// </summary>
+    private readonly record struct Call(HttpMethod Method, string Path, string Query, string Body, string IdempotencyKey, bool Retryable)
+    {
+        /// <summary>A GET: an empty body and an empty key. Always safe to send again.</summary>
+        public static Call Read(string path, string query = "")
+            => new(HttpMethod.Get, path, query, string.Empty, string.Empty, Retryable: true);
+
+        /// <summary>A DELETE: an empty body and an empty key. Never retried.</summary>
+        public static Call Delete(string path)
+            => new(HttpMethod.Delete, path, string.Empty, string.Empty, string.Empty, Retryable: false);
+
+        /// <summary>A call with a body. Retried only when it is a POST with an idempotency key.</summary>
+        public static Call Write(HttpMethod method, string path, string body, string idempotencyKey)
+            => new(method, path, string.Empty, body, idempotencyKey, Retryable: method == HttpMethod.Post && idempotencyKey.Length > 0);
+    }
+
+    /// <summary>
+    /// A retry policy: the name the warning uses, the number of retries after the first attempt,
+    /// and the base wait.
+    /// </summary>
+    private readonly record struct Retries(string Operation, int Max, TimeSpan BaseDelay);
 
     /// <summary>
     /// One parsed gateway answer: the HTTP status and the envelope as sent.
@@ -1621,14 +1716,21 @@ public sealed class DominaiteClient : IDisposable
     /// </remarks>
     private readonly struct ApiReply
     {
-        public ApiReply(int status, JsonElement envelope, TimeSpan? retryAfter = null)
+        public ApiReply(int status, JsonElement envelope, string? headerRequestId, TimeSpan? retryAfter = null)
         {
             this.Status = status;
             this.Envelope = envelope;
             this.RetryAfter = retryAfter;
+            this.RequestId = headerRequestId ?? BodyRequestId(envelope);
         }
 
         public int Status { get; }
+
+        /// <summary>
+        /// The <c>Dominaite-Request-Id</c> header, else the body's <c>metadata.requestId</c>, else
+        /// null. Quote it to Dominaite support.
+        /// </summary>
+        public string? RequestId { get; }
 
         /// <summary>The wait from the <c>Retry-After</c> header; read on a 429 only.</summary>
         public TimeSpan? RetryAfter { get; }
@@ -1663,6 +1765,20 @@ public sealed class DominaiteClient : IDisposable
         public string? ErrorMessage
             => (this.Envelope.TryGetProperty("error", out var error) ? StringField(error, "message") : null)
                 ?? StringField(this.Payload, "errorMessage");
+
+        /// <summary>
+        /// The unwrapped <c>data</c> on a success (an empty object for a 204), or the generic
+        /// rejection for a 4xx or 5xx.
+        /// </summary>
+        public JsonElement ReadPayload()
+        {
+            if (this.Status >= 400)
+            {
+                throw this.Rejection();
+            }
+
+            return this.Payload;
+        }
 
         /// <summary>
         /// The <c>data</c> object on a success, or the generic rejection for a 4xx or 5xx.
@@ -1719,6 +1835,7 @@ public sealed class DominaiteClient : IDisposable
 
             var charge = Deserialize<PaymentMethodCharge>(data, "charge");
             charge.Raw = data;
+            charge.RequestId = this.RequestId;
             return charge;
         }
 
@@ -1751,6 +1868,7 @@ public sealed class DominaiteClient : IDisposable
 
             var refund = Deserialize<Refund>(data, "refund");
             refund.Raw = data;
+            refund.RequestId = this.RequestId;
             return refund;
         }
 
@@ -1784,6 +1902,7 @@ public sealed class DominaiteClient : IDisposable
 
             var list = Deserialize<RefundList>(data, "refund list");
             list.Raw = data;
+            list.RequestId = this.RequestId;
             list.Refunds = [.. refunds.EnumerateArray().Select(item =>
             {
                 var refund = Deserialize<Refund>(item, "refund");
@@ -1820,6 +1939,23 @@ public sealed class DominaiteClient : IDisposable
         /// 400 is the whole point of the rejection).
         /// </summary>
         public DominaiteException Rejection()
+        {
+            var rejection = this.Reject();
+            rejection.RequestId ??= this.RequestId;
+            return rejection;
+        }
+
+        /// <summary>
+        /// The <c>metadata.requestId</c> string of an envelope, cleaned like the header, or null.
+        /// </summary>
+        private static string? BodyRequestId(JsonElement envelope)
+            => envelope.ValueKind == JsonValueKind.Object
+                && envelope.TryGetProperty("metadata", out var metadata)
+                && metadata.ValueKind == JsonValueKind.Object
+                    ? CleanRequestId(StringField(metadata, "requestId"))
+                    : null;
+
+        private DominaiteException Reject()
         {
             if (this.Status >= 500)
             {
@@ -2050,10 +2186,11 @@ public sealed class DominaiteClient : IDisposable
         return normalized;
     }
 
-    private static WebhookEndpoint ToWebhookEndpoint(JsonElement data)
+    private static WebhookEndpoint ToWebhookEndpoint(JsonElement data, string? requestId)
     {
         var endpoint = Deserialize<WebhookEndpoint>(data, "webhook endpoint");
         endpoint.Raw = data;
+        endpoint.RequestId = requestId;
         return endpoint;
     }
 
@@ -2122,17 +2259,19 @@ public sealed class DominaiteClient : IDisposable
         return utc.ToString(format, CultureInfo.InvariantCulture);
     }
 
-    private static Plan ToPlan(JsonElement data)
+    private static Plan ToPlan(JsonElement data, string? requestId)
     {
         var plan = Deserialize<Plan>(data, "plan");
         plan.Raw = data;
+        plan.RequestId = requestId;
         return plan;
     }
 
-    private static Agreement ToAgreement(JsonElement data)
+    private static Agreement ToAgreement(JsonElement data, string? requestId)
     {
         var agreement = Deserialize<Agreement>(data, "agreement");
         agreement.Raw = data;
+        agreement.RequestId = requestId;
         return agreement;
     }
 
