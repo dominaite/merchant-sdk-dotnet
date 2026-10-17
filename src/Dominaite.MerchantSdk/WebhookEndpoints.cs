@@ -52,8 +52,8 @@ public sealed class CreateWebhookEndpointRequest
     /// body.
     /// </summary>
     /// <remarks>
-    /// A retry with the same key and body returns the same endpoint, without the secret. Only the
-    /// first answer has the secret.
+    /// Only the first answer has the secret. After a timeout, retry with the same key and body. If
+    /// the answer has no secret, delete that endpoint and create it again with a new key.
     /// </remarks>
     [JsonIgnore]
     public string? IdempotencyKey { get; set; }
@@ -101,6 +101,13 @@ public sealed class WebhookEndpoint
     /// </summary>
     [JsonIgnore]
     public JsonElement Raw { get; set; }
+
+    /// <summary>
+    /// The id the API gave this request: the <c>Dominaite-Request-Id</c> header, else the body's
+    /// <c>metadata.requestId</c>. Null when the API sent no id. Quote it to Dominaite support.
+    /// </summary>
+    [JsonIgnore]
+    public string? RequestId { get; internal set; }
 
     /// <summary>True only for <c>active</c>: the endpoint receives deliveries.</summary>
     [JsonIgnore]

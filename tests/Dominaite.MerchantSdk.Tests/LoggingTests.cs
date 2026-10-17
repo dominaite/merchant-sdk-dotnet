@@ -168,6 +168,7 @@ public class LoggingTests
             Timeout = TimeSpan.FromSeconds(5),
             OnDebug = debug.Add,
             OnWarning = _ => { },
+            MaxRetries = 0,
         });
 
         await Assert.ThrowsAsync<DominaiteTransportException>(() => client.PingAsync());

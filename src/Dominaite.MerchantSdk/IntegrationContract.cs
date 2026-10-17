@@ -34,6 +34,13 @@ public sealed class IntegrationContract
     /// <summary>The unwrapped contract as the gateway sent it, with every field this class does not model.</summary>
     [JsonIgnore]
     public JsonElement Raw { get; set; }
+
+    /// <summary>
+    /// The id the API gave this request: the <c>Dominaite-Request-Id</c> header, else the body's
+    /// <c>metadata.requestId</c>. Null when the API sent no id. Quote it to Dominaite support.
+    /// </summary>
+    [JsonIgnore]
+    public string? RequestId { get; internal set; }
 }
 
 /// <summary>The subscription part of the <see cref="IntegrationContract"/>.</summary>
