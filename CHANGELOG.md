@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.7.0 (unreleased)
+
+### Breaking
+
+- The client retries by itself. `DominaiteClientOptions.MaxRetries` defaults to 2, so a GET or a
+  POST with an idempotency key that fails with a transport error, a 5xx with no typed meaning on
+  the route or `PAYMENT_PROCESSING_UNAVAILABLE` is sent up to 3 times. Set `MaxRetries = 0` to
+  keep the old one-send behavior. A 429, a PATCH, a DELETE and `CreateWebhookEndpointAsync` are
+  never retried.
+- `Timeout` is per attempt. With retries, one call can take up to (`MaxRetries` + 1) x `Timeout`,
+  plus the waits between attempts (each up to 500ms x 2^n, capped at 8 seconds).
+- A coded charge 404 (for example `PAYMENT_METHOD_NOT_FOUND`) is now a
+  `DominaiteChargeException`, not a `DominaiteApiException`. Both still derive from
+  `DominaiteException`, so a catch on the base type is unchanged.
+- A charge or revoke 5xx whose code is not in `ChargeErrorCodes.All` or `RevokeErrorCodes.All`
+  (for example `INTERNAL_ERROR`) is now a `DominaiteTransportException` that keeps the code. It was
+  a `DominaiteChargeException` or a `DominaiteRevokeException`.
+- `DominaiteChargeException.IsRetryable` is now true for `DUPLICATE_REQUEST`, as on refunds.
+- These now fail before anything is sent, with `DominaiteValidationException`: a currency that is
+  not three upper-case letters, a `ListTransactionsAsync` window with `From` or `To` unset, a
+  `CreatePlanAsync` amount of 0 or less, and a session `Consent` without `AcceptedAt`.
+
+### Added
+
+- `RequestId` on every result and on `DominaiteException`: the `Dominaite-Request-Id` header, else
+  the body's `metadata.requestId`. The debug line uses the same fallback.
+- `IdempotencyKey` is now set on the errors of every call that sends one, not only session create.
+- `ChargeEventData.PaymentMethod` (`Brand`, `Last4`) on `charge.*` webhook events.
+- Error-code constants for every code the gateway names: `AuthErrorCodes`,
+  `SubscriptionErrorCodes`, `WebhookEndpointErrorCodes`, `ValidationErrorCodes`,
+  `ErrorCodes.Idempotency`, `ErrorCodes.Transient`, the subscription session refusals in
+  `ErrorCodes.SessionRefusals`, and the agreement, cap and in-progress codes in
+  `ChargeErrorCodes.All`. New codes are appended, so the existing order is unchanged.
+
+### Changed
+
+- A stored payment method id is lowercased before it is signed and sent.
+
+### Deprecated
+
+- `CreateCheckoutSessionWithRetryAsync` and `RetryOptions`. Use `CreateCheckoutSessionAsync` and
+  `MaxRetries`. The method still works as a thin wrapper over the client's policy: its
+  `Attempts` and `BaseDelay` replace the client's values for that call, and each wait is now a
+  random time up to the doubling ceiling.
+
 ## 0.6.0
 
 ### Breaking

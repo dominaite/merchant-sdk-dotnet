@@ -209,7 +209,8 @@ client on that base URL with a 45s timeout. `DominaiteClientOptions` takes:
 | Option | What |
 |---|---|
 | `BaseUrl` | Required. `DominaiteClient.SandboxBaseUrl` or `DominaiteClient.ProductionBaseUrl`, or your own value. Missing, empty or whitespace throws `DominaiteValidationException`. Must be `https://`; `http://` only for localhost, 127.0.0.1 and ::1. |
-| `Timeout` | Per-request timeout. Defaults to 45s (serverless cold starts can take 10+s). |
+| `Timeout` | Timeout for one attempt. Defaults to 45s (serverless cold starts can take 10+s). With retries, one call can take up to (`MaxRetries` + 1) x `Timeout`, plus the waits between attempts. |
+| `MaxRetries` | How many times a failed call is sent again. Defaults to 2; 0 sends every call once. Negative throws `DominaiteValidationException`. See [Automatic retries](#automatic-retries). |
 | `UserAgentSuffix` | Appends your identifier to the SDK's User-Agent after one space, which helps when support reads the access logs. The SDK sends `dominaite-dotnet/0.6.0 (dotnet 8.0.11) <suffix>`. A control character in the suffix throws `DominaiteValidationException`. |
 | `OnWarning` | Your `Action<string>` for the SDK's warnings. Defaults to `Trace.TraceWarning`. See [Logging and warnings](#logging-and-warnings). |
 | `OnDebug` | Your `Action<string>` for the debug log. Off when null, the default. |
@@ -240,13 +241,17 @@ using var client = new DominaiteClient(keyId, secret, new DominaiteClientOptions
     You get it once per distinct notice per client, for example
     `dominaite-dotnet 0.6.0 is deprecated; upgrade to 0.7.0 (sunset 2027-01-31). https://...`.
     The SDK reads it on every response, errors included. No header means no warning.
-  - each retry in `CreateCheckoutSessionWithRetryAsync`, with the reason and the attempt.
+  - each automatic retry, with the call, the reason and the attempt, for example
+    `dominaite-dotnet: retrying POST /merchant-api/payment-methods/pm_.../charges after DominaiteTransportException (attempt 2 of 3)`.
   - a `PingAsync` clock skew over 60 seconds. Requests fail at 300.
-- **Debug** is off by default. Set `OnDebug` and you get one line per request:
+- **Debug** is off by default. Set `OnDebug` and you get one line per request, so a retried call
+  writes one line per attempt:
   `dominaite-dotnet: POST /merchant-api/checkout/sessions 200 182ms request_id=... idempotency_key=...`.
   That is the method, the signed path, the status (`error` for a network failure), the time,
-  the `Dominaite-Request-Id` response header when the API sent one, and the idempotency key
-  when the call had one. Give support the request id to find a call.
+  the request id when the API sent one (the `Dominaite-Request-Id` header, else the body's
+  `metadata.requestId`), and the idempotency key when the call had one. Give support the request
+  id to find a call. Every result and every `DominaiteException` carries the same id as
+  `RequestId`.
 - **Never logged**: the secret, the signature, the cashier token, query strings, and request or
   response bodies.
 - An exception thrown by your callback is dropped. It never fails the call.
@@ -298,19 +303,32 @@ which is what the gateway wants: a reused key with a different amount is refused
 yourself: 1 to 100 characters, visible ASCII only (`!` to `~`, so no spaces and no non-ASCII order
 ids).
 
-`CreateCheckoutSessionWithRetryAsync` sends the request's key on every attempt,
-retrying transport failures (network errors, timeouts, and 5xx including
-`MERCHANT_API_UNAVAILABLE`) and `PAYMENT_PROCESSING_UNAVAILABLE`, which means card payments are
-off for a moment and nothing was created. Every other refusal, storefront refusals, and
-authentication and permission failures are thrown immediately - they will not change. A rate limit
-(HTTP 429) is thrown immediately too: wait `RetryAfter`, then call again with the same key.
-`IsRetryable` on any `DominaiteException` gives you the same answer for your own retry loop.
+### Automatic retries
 
-```csharp
-var session = await client.CreateCheckoutSessionWithRetryAsync(
-    request,
-    new RetryOptions { Attempts = 3, BaseDelay = TimeSpan.FromMilliseconds(500) });
-```
+The client retries a failed call by itself, up to `MaxRetries` times (default 2), with the SAME
+idempotency key, path and body on every attempt. Each attempt gets a fresh timestamp and so a
+fresh signature. Before retry n (counting from 0) the client waits a random time between 0 and
+500ms x 2^n, capped at 8 seconds (full jitter). Set `MaxRetries = 0` to turn this off and run your
+own loop.
+
+| | Retried automatically |
+|---|---|
+| Calls | Every GET, and every POST that carries an idempotency key: session create, charge, refund, plan create, agreement create. |
+| Failures | Transport failures (network errors, timeouts, a 5xx with no typed meaning on the route, `MERCHANT_API_UNAVAILABLE` included) and `PAYMENT_PROCESSING_UNAVAILABLE`. |
+| Never | `CreateWebhookEndpointAsync`, whatever `MaxRetries` says: only the first answer carries the signing secret, so a replay after a lost answer would come back without it. Every PATCH and DELETE (plan update, plan delete, agreement cancel, revoke, webhook delete). A 429: wait `RetryAfter`, then call again with the same key. The typed charge outcomes (`CHARGE_OUTCOME_UNKNOWN`, `CHARGE_FAILED`, `PAYMENT_METHOD_CHARGES_DISABLED`): they are answers, not outages. Every other 4xx and refusal. |
+
+`Timeout` is per attempt. With the defaults, one call can take up to 3 x 45s plus the waits
+between attempts before it throws. Lower `Timeout` or `MaxRetries` if a caller is waiting on it.
+When every attempt fails, you get the last error.
+
+`IsRetryable` on a `DominaiteException` is a wider question: can a retry with the same key
+succeed later? It is also true for `DUPLICATE_REQUEST` on a charge or a refund and for
+`REFUND_NOT_FOUND`. The client does not retry those on its own: they need a wait that only you
+can judge. Retry them yourself, after a short wait, with the same key.
+
+`CreateCheckoutSessionWithRetryAsync` is deprecated. It still works, as a thin wrapper over the
+same policy: `RetryOptions.Attempts` and `BaseDelay` replace the client's values for that call, and
+the two do not stack. Use `CreateCheckoutSessionAsync` instead.
 
 Reusing the key is what makes the retry safe: a retried key never opens a second payment. A clean
 replay of a session that is still open returns the ORIGINAL session, same `TransactionId` and
@@ -325,7 +343,7 @@ with a new session or the original one, or hands you the transaction id to read 
 ```csharp
 try
 {
-    var session = await client.CreateCheckoutSessionWithRetryAsync(request);
+    var session = await client.CreateCheckoutSessionAsync(request);
 }
 catch (DominaiteRefusalException error) when (error.TransactionId is { } collided)
 {
@@ -495,7 +513,8 @@ catch (DominaiteChargeException error)
             await AlertOpsAsync();
             break;
         // Nothing was charged; retry later with the SAME key (error.IdempotencyKey).
-        // error.IsRetryable is true for PAYMENT_PROCESSING_UNAVAILABLE.
+        // error.IsRetryable is true for both. The client already retried
+        // PAYMENT_PROCESSING_UNAVAILABLE MaxRetries times before it threw.
         case ChargeErrorCodes.DuplicateRequest:
         case ChargeErrorCodes.PaymentProcessingUnavailable:
             await RetryLaterAsync();
@@ -514,15 +533,15 @@ null, for example when nobody declined the payment. The provider can refine the 
 latest one. `IsPaid` and `IsTerminal` read the same way they do on a session status; `pending` is
 the one status that is not terminal.
 
-`DominaiteChargeException` is the gateway answering with an error code instead of a charge: HTTP
-409 (`PAYMENT_METHOD_NOT_ACTIVE`, `DUPLICATE_REQUEST`), 422 (`IDEMPOTENCY_KEY_REUSED`), 502
-(`CHARGE_OUTCOME_UNKNOWN`, `CHARGE_FAILED`) or 503 (`PAYMENT_METHOD_CHARGES_DISABLED`,
-`PAYMENT_PROCESSING_UNAVAILABLE`). The exception keeps `HttpStatus`, `Code`, the gateway's
-message, the `IdempotencyKey` to reuse, and the charge row on `Charge` when the gateway attached
-one (always for `CHARGE_OUTCOME_UNKNOWN`, whose `TransactionId` is what you poll). A 404 is a
-method id that is not yours and stays the plain `DominaiteApiException` with code
-`PAYMENT_METHOD_NOT_FOUND`; a 5xx without a gateway code (an HTML page from a proxy) stays
-`DominaiteTransportException`.
+`DominaiteChargeException` is the gateway answering with an error code instead of a charge, for
+example HTTP 404 (`PAYMENT_METHOD_NOT_FOUND`), 409 (`PAYMENT_METHOD_NOT_ACTIVE`,
+`DUPLICATE_REQUEST`), 422 (`IDEMPOTENCY_KEY_REUSED`), 502 (`CHARGE_OUTCOME_UNKNOWN`,
+`CHARGE_FAILED`) or 503 (`PAYMENT_METHOD_CHARGES_DISABLED`, `PAYMENT_PROCESSING_UNAVAILABLE`).
+`ChargeErrorCodes.All` lists every code, the agreement and cap codes included. The exception keeps `HttpStatus`, `Code`, the gateway's message, the
+`IdempotencyKey` to reuse, and the charge row on `Charge` when the gateway attached one (always
+for `CHARGE_OUTCOME_UNKNOWN`, whose `TransactionId` is what you poll). A 400 stays the plain
+`DominaiteApiException`. A 5xx whose code is not in `ChargeErrorCodes.All` (a proxy's HTML page,
+or `INTERNAL_ERROR`) is a `DominaiteTransportException` that keeps the code.
 
 `RevokePaymentMethodAsync` drops the card: the gateway deletes the saved credential at the
 provider and marks the method `revoked`, and any later charge on it is refused with
@@ -530,7 +549,9 @@ provider and marks the method `revoked`, and any later charge on it is refused w
 recipe as GET) and resolves on HTTP 204, again on an already revoked method. When the gateway
 refuses, nothing changed and you get `DominaiteRevokeException` with the code:
 `MERCHANT_API_UNAVAILABLE` (503, retry later) or `UPSTREAM_CONTRACT_ERROR` (502, contact support
-with the id). A 404 is the plain `DominaiteApiException` with code `VALIDATION_ERROR`.
+with the id). Any other 5xx is a `DominaiteTransportException` that keeps the code. A 404 is the
+plain `DominaiteApiException` with code `VALIDATION_ERROR`. A revoke is a DELETE, so the client
+never retries it on its own.
 
 ```csharp
 try
@@ -912,7 +933,8 @@ A new API field never needs a new SDK release:
 ## Errors
 
 Every call throws a subclass of `DominaiteException`. Catch the subclass, and read `Code` for the
-machine-readable string where there is one.
+machine-readable string where there is one. Every error also carries `RequestId`, the id the API
+gave the request, when the API sent one. Quote it to support.
 
 | Exception | When | What to do |
 |---|---|---|
@@ -920,21 +942,27 @@ machine-readable string where there is one.
 | `DominaiteStorefrontException` | Session create refused because of the storefront: `STOREFRONT_NOT_WHITELISTED` or `STOREFRONT_INACTIVE` (409), `STOREFRONT_MISMATCH` (400, or 200 on a replay). Carries `TransactionId` on a replay and `RawResult`. | Configuration, not a retry. See [Storefront errors](#storefront-errors). |
 | `DominaiteAuthException` | 401. `Code` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
 | `DominaitePermissionException` | 403. The key and the signature were good, but the call is not allowed. `Code` is `INSUFFICIENT_SCOPE` (the key does not have the scope the route needs; the message names it) or `VERIFY_ONLY_NOT_ENABLED`. | Use a key that has the scope. For verify-only: we switch it on for your account, so contact Dominaite support. Never retry-loop. |
-| `DominaiteRateLimitException` | 429. A limit refused the call and nothing was done. `Code` is `RATE_LIMIT_EXCEEDED`, `CHARGE_VELOCITY_EXCEEDED` or `CHARGE_DECLINE_RATE_EXCEEDED` (`RateLimitErrorCodes`). `RetryAfter` is the wait from the `Retry-After` header, or null when there was none. | Wait `RetryAfter` (a few seconds when null), then retry with the **same** idempotency key. `IsRetryable` is false and the retry helper does not retry it. |
-| `DominaiteTransportException` | Network failure, timeout, or a 5xx, including one whose body is an HTML error page from a proxy. The charge and the revoke have their own exceptions for their 502 and 503 codes. `Code` keeps the gateway's code when the 5xx carried one. | Retry with the **same** idempotency key. `IsRetryable` is always true here, and elsewhere only for `PAYMENT_PROCESSING_UNAVAILABLE`. |
-| `DominaiteChargeException` | `ChargePaymentMethodAsync` got an error code instead of a charge: 409, 422, 502 or 503. Carries `Charge`, `TransactionId` and `RawResult`. | Branch on `Code` (see [Stored payment methods](#stored-payment-methods-recurring)). `CHARGE_OUTCOME_UNKNOWN` carries the `TransactionId` to poll; never retry it under a new key. |
+| `DominaiteRateLimitException` | 429. A limit refused the call and nothing was done. `Code` is `RATE_LIMIT_EXCEEDED`, `CHARGE_VELOCITY_EXCEEDED` or `CHARGE_DECLINE_RATE_EXCEEDED` (`RateLimitErrorCodes`). `RetryAfter` is the wait from the `Retry-After` header, or null when there was none. | Wait `RetryAfter` (a few seconds when null), then retry with the **same** idempotency key. `IsRetryable` is false and the client never retries it. |
+| `DominaiteTransportException` | Network failure, timeout, or a 5xx, including one whose body is an HTML error page from a proxy. The charge and the revoke have their own exceptions for the 5xx codes in their own lists; any other 5xx on them is a transport failure. `Code` keeps the gateway's code when the 5xx carried one. | The client already retried it `MaxRetries` times when the call was safe to replay. Retry later with the **same** idempotency key. `IsRetryable` is always true here. |
+| `DominaiteChargeException` | `ChargePaymentMethodAsync` got an error code instead of a charge: 404, 409, 422, or a 502 or 503 with a code in `ChargeErrorCodes.All`. Carries `Charge`, `TransactionId` and `RawResult`. | Branch on `Code` (see [Stored payment methods](#stored-payment-methods-recurring)). `CHARGE_OUTCOME_UNKNOWN` carries the `TransactionId` to poll; never retry it under a new key. `IsRetryable` is true for `DUPLICATE_REQUEST` and `PAYMENT_PROCESSING_UNAVAILABLE`. |
 | `DominaiteRefundException` | `CreateRefundAsync`, `GetRefundAsync` or `ListRefundsAsync` got an error code instead of a refund: 400, 404, 409 or 422. Carries `RawResult`. | Branch on `Code` (see [Refunds](#refunds)). `IsRetryable` is true for `DUPLICATE_REQUEST` and `REFUND_NOT_FOUND`. |
 | `DominaiteRevokeException` | `RevokePaymentMethodAsync` was refused: 502 `UPSTREAM_CONTRACT_ERROR` or 503 `MERCHANT_API_UNAVAILABLE`. Nothing changed. | Retry later on 503; contact support on 502. |
-| `DominaiteApiException` | Any other rejecting or unexpected response, including a 3xx. `Code` carries the API's reason when it sent one, e.g. `IDEMPOTENCY_KEY_REQUIRED` on a 400, `PAYMENT_METHOD_NOT_FOUND` on a charge 404. Carries `RawResult`, the whole envelope: the field errors of a 400 are in `error.validationErrors`. | Inspect `HttpStatus` and `Code`. A 404 from `GetStatusAsync` is an unknown transaction id. |
-| `DominaiteValidationException` | Bad arguments (non-positive amount, missing field, missing idempotency key, malformed key id). | Fix the call; nothing was sent. |
+| `DominaiteApiException` | Any other rejecting or unexpected response, including a 3xx. `Code` carries the API's reason when it sent one, e.g. `IDEMPOTENCY_KEY_REQUIRED` on a 400, `PLAN_NOT_FOUND` on a 404. Carries `RawResult`, the whole envelope: the field errors of a 400 are in `error.validationErrors`. | Inspect `HttpStatus` and `Code`. A 404 from `GetStatusAsync` is an unknown transaction id. |
+| `DominaiteValidationException` | Bad arguments (non-positive amount, missing field, missing idempotency key, malformed key id, a currency that is not three upper-case letters, an unset transaction window). | Fix the call; nothing was sent. |
 
-Failures from a session create also carry `IdempotencyKey`, so a log line tells you which key to
-reuse.
+Failures of every call that sends an idempotency key also carry `IdempotencyKey`, so a log line
+tells you which key to reuse.
+
+The codes have constants per area: `AuthErrorCodes`, `PermissionErrorCodes`,
+`RateLimitErrorCodes`, `ErrorCodes` (sessions, idempotency and transient codes),
+`ChargeErrorCodes`, `RevokeErrorCodes`, `RefundErrorCodes`, `SubscriptionErrorCodes` (plans and
+agreements), `WebhookEndpointErrorCodes` and `ValidationErrorCodes` (the field codes of a
+`VALIDATION_ERROR`). Branch on those rather than on string literals.
 
 Refusal codes on `DominaiteRefusalException`:
 
 - `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; nothing was created. Retry
-  with the same key (`IsRetryable` is true, and the retry helper does it for you).
+  with the same key (`IsRetryable` is true, and the client retries it for you).
 - `DUPLICATE_REQUEST` - an attempt with this idempotency key is still unfinished but its session
   cannot be handed back right now (still being written, or expired and not yet superseded).
   Re-POST the same key shortly, never a fresh one. An open session that CAN be handed back is not
@@ -958,8 +986,8 @@ the gateway can refuse it before anything is created:
 - `STOREFRONT_MISMATCH` (HTTP 400) - the API key is bound to a different storefront than the one
   the request names. An idempotent replay says the same thing as HTTP 200 with `success: false`.
 
-All three arrive as `DominaiteStorefrontException`, whatever the status, and the retry helper
-never retries them:
+All three arrive as `DominaiteStorefrontException`, whatever the status, and the client never
+retries them:
 
 ```csharp
 catch (DominaiteStorefrontException error) when (error.Code == ErrorCodes.StorefrontNotWhitelisted)

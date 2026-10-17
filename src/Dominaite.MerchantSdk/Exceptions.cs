@@ -29,8 +29,8 @@ public abstract class DominaiteException : Exception
     public int? HttpStatus { get; protected init; }
 
     /// <summary>
-    /// The idempotency key the failed call used, set on session-create failures. Reuse this key
-    /// when you retry: a fresh key on a retry is the double-charge bug.
+    /// The idempotency key the failed call used, set on the failures of every call that sends one.
+    /// Reuse this key when you retry: a fresh key on a retry is the double-charge bug.
     /// </summary>
     public string? IdempotencyKey { get; internal set; }
 
@@ -1004,6 +1004,8 @@ public sealed class DominaiteRefundException : DominaiteException
 /// request may or may not have reached the API, so retry WITH THE SAME idempotency key.
 /// </summary>
 /// <remarks>
+/// When the call was safe to replay, the client already retried it
+/// <see cref="DominaiteClientOptions.MaxRetries"/> times before it threw this.
 /// When the 5xx was the gateway talking (a JSON envelope rather than a proxy's HTML page), its
 /// code is kept on <see cref="DominaiteException.Code"/>, e.g. <c>MERCHANT_API_UNAVAILABLE</c>.
 /// </remarks>
