@@ -66,11 +66,14 @@ public class ContractTests
     private static void AssertFields<T>(IEnumerable<string> expected)
         => Assert.Equal(expected.Order().ToList(), WireFields<T>().Order().ToList());
 
+    // One attempt per call, so each test reads the mapping of exactly one answer. RetryTests
+    // covers the retry policy.
     private static DominaiteClient ClientFor(MockServer server)
         => new(KeyId, Secret, new DominaiteClientOptions
         {
             BaseUrl = server.BaseUrl,
             Timeout = TimeSpan.FromSeconds(10),
+            MaxRetries = 0,
         });
 
     private static CheckoutSessionRequest Request() => new()

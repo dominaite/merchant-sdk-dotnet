@@ -17,11 +17,14 @@ public class ClientTests
         {"success":true,"checkout":{"transactionId":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","orderId":"dom_9a8b7c6d5e4f","cashierKey":"ck_live_2f3a4d5e6f708192","cashierToken":"ctok_5e4f3a2b1c0d9e8f","amount":8440,"currency":"EUR","expiresAt":"2026-08-21T11:15:30.000Z"}}
         """;
 
+    // One attempt per call, so each test reads the mapping of exactly one answer. RetryTests
+    // covers the retry policy.
     private static DominaiteClient ClientFor(MockServer server)
         => new(KeyId, Secret, new DominaiteClientOptions
         {
             BaseUrl = server.BaseUrl,
             Timeout = TimeSpan.FromSeconds(10),
+            MaxRetries = 0,
         });
 
     private static CheckoutSessionRequest Request() => new()

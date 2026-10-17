@@ -94,6 +94,12 @@ public sealed class DominaiteClient : IDisposable
     private const int MaxRequestIdLength = 128;
     private const long ClockSkewWarningSeconds = 60;
 
+    /// <summary>The policy's base wait: the first retry waits up to this long.</summary>
+    private static readonly TimeSpan BaseRetryDelay = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>The longest single wait between two attempts.</summary>
+    private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(8);
+
     private const string KeyIdPrefix = "dmk_";
     private const string SecretPrefix = "dms_";
 
@@ -130,6 +136,9 @@ public sealed class DominaiteClient : IDisposable
     private readonly bool _ownsHttpClient;
     private readonly Action<string> _onWarning;
     private readonly Action<string>? _onDebug;
+    private readonly int _maxRetries;
+    private readonly Func<TimeSpan, CancellationToken, Task> _sleep;
+    private readonly Func<double> _random;
 
     /// <summary>The notice values this client already warned about, so each warns once.</summary>
     private readonly HashSet<string> _seenNotices = new(StringComparer.Ordinal);
@@ -176,6 +185,11 @@ public sealed class DominaiteClient : IDisposable
         RequireEncryptedTransport(baseUrl);
         options ??= new DominaiteClientOptions();
 
+        if (options.MaxRetries < 0)
+        {
+            throw new DominaiteValidationException("MaxRetries must not be negative");
+        }
+
         this._keyId = keyId;
         this._secret = secret;
         this.BaseUrl = baseUrl;
@@ -183,6 +197,9 @@ public sealed class DominaiteClient : IDisposable
         this.UserAgent = BuildUserAgent(options.UserAgentSuffix);
         this._onWarning = options.OnWarning ?? (message => Trace.TraceWarning(message));
         this._onDebug = options.OnDebug;
+        this._maxRetries = options.MaxRetries;
+        this._sleep = options.Sleep ?? Task.Delay;
+        this._random = options.Random ?? Random.Shared.NextDouble;
 
         if (options.HttpClient is not null)
         {
@@ -293,14 +310,26 @@ public sealed class DominaiteClient : IDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        return await this.CreateCheckoutSessionCoreAsync(request, null, cancellationToken).ConfigureAwait(false);
+    }
 
+    /// <summary>
+    /// Creates a session under <paramref name="retries"/>, or under the client's own policy when
+    /// it is null.
+    /// </summary>
+    private async Task<CheckoutSession> CreateCheckoutSessionCoreAsync(
+        CheckoutSessionRequest request,
+        Retries? retries,
+        CancellationToken cancellationToken)
+    {
         var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
         var body = SerializeBody(request);
 
         return await this.CallAsync(
                 Call.Write(HttpMethod.Post, SessionsPath, body, idempotencyKey),
                 ReadCheckoutSession,
-                cancellationToken)
+                cancellationToken,
+                retries)
             .ConfigureAwait(false);
     }
 
@@ -356,25 +385,27 @@ public sealed class DominaiteClient : IDisposable
 
     /// <summary>
     /// Creates a session, retrying transport failures and <c>PAYMENT_PROCESSING_UNAVAILABLE</c>,
-    /// with THE SAME idempotency key across every attempt.
+    /// with THE SAME idempotency key across every attempt. Deprecated: since 0.7.0
+    /// <see cref="CreateCheckoutSessionAsync"/> retries the same way under
+    /// <see cref="DominaiteClientOptions.MaxRetries"/>.
     /// </summary>
     /// <remarks>
+    /// This is now a thin wrapper over the client's retry policy, with its own attempt count and
+    /// base wait in place of the client's. It does not stack on top of the client's own retries.
     /// Reusing the key is what makes the retry safe: a transport failure leaves you not knowing
     /// whether the request landed, and a retried key never opens a second payment. If the first
     /// attempt did land and its session is still open, the retry returns that ORIGINAL session.
     /// If it has moved on, the retry comes back as a replay refusal (<c>ALREADY_PROCESSED</c>,
     /// <c>PRIOR_ATTEMPT_FAILED</c>, <c>DUPLICATE_REQUEST</c>) naming that transaction, which you
-    /// read back with <see cref="GetStatusAsync"/>. A fresh key per attempt would be exactly the
-    /// double-charge bug this method exists to prevent, so every attempt sends the request's own
-    /// key, which is required.
-    /// <c>PAYMENT_PROCESSING_UNAVAILABLE</c> is retried too: it arrives as a refusal, but card
-    /// payments come back on their own and nothing was created. Every other refusal, storefront
-    /// refusals, and authentication and permission failures are thrown immediately: they will not
-    /// change. A rate limit (HTTP 429) is thrown immediately too: wait
+    /// read back with <see cref="GetStatusAsync"/>. Every other refusal, storefront refusals,
+    /// and authentication and permission failures are thrown immediately: they will not change.
+    /// A rate limit (HTTP 429) is thrown immediately too: wait
     /// <see cref="DominaiteRateLimitException.RetryAfter"/>, then call again with the same key.
     /// </remarks>
     /// <param name="request">The session parameters.</param>
-    /// <param name="options">Attempts and backoff. Defaults to 3 attempts, 500ms doubling.</param>
+    /// <param name="options">
+    /// Attempts and backoff. Defaults to 3 attempts; each wait is random, up to 500ms doubling.
+    /// </param>
     /// <param name="cancellationToken">Cancels the call and the waits between attempts.</param>
     /// <returns>The created session.</returns>
     public async Task<CheckoutSession> CreateCheckoutSessionWithRetryAsync(
@@ -390,31 +421,11 @@ public sealed class DominaiteClient : IDisposable
             throw new DominaiteValidationException("Attempts must be at least 1");
         }
 
-        // Checked once, up front, so a missing key fails before the first attempt.
-        IdempotencyKeys.Validate(request.IdempotencyKey);
-
-        DominaiteException? lastError = null;
-        for (var attempt = 0; attempt < options.Attempts; attempt++)
-        {
-            try
-            {
-                return await this.CreateCheckoutSessionAsync(request, cancellationToken).ConfigureAwait(false);
-            }
-            catch (DominaiteException error) when (error.IsRetryable)
-            {
-                lastError = error;
-                if (attempt + 1 < options.Attempts)
-                {
-                    this.Warn(
-                        $"dominaite-dotnet: retrying CreateCheckoutSessionWithRetryAsync after {RetryReason(error)} "
-                        + $"(attempt {attempt + 2} of {options.Attempts})");
-                    var delay = options.BaseDelay * Math.Pow(2, Math.Min(attempt, 16));
-                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-                }
-            }
-        }
-
-        throw lastError ?? new DominaiteTransportException("Retrying gave up.");
+        return await this.CreateCheckoutSessionCoreAsync(
+                request,
+                new Retries(nameof(this.CreateCheckoutSessionWithRetryAsync), options.Attempts - 1, options.BaseDelay),
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
@@ -960,7 +971,9 @@ public sealed class DominaiteClient : IDisposable
     /// secret, delete the endpoint and register it again with a new key. On
     /// <c>WEBHOOK_ALREADY_REGISTERED</c> the key was used for an endpoint that still exists, and
     /// its id is in <c>error.params.webhookId</c> of
-    /// <see cref="DominaiteApiException.RawResult"/>.
+    /// <see cref="DominaiteApiException.RawResult"/>. The client's retry policy never retries this
+    /// call, whatever <see cref="DominaiteClientOptions.MaxRetries"/> says: a replay after a lost
+    /// answer would come back without the secret.
     /// </remarks>
     /// <param name="request">
     /// The endpoint. <see cref="CreateWebhookEndpointRequest.IdempotencyKey"/> is required.
@@ -988,7 +1001,9 @@ public sealed class DominaiteClient : IDisposable
         var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
         var body = SerializeWithExtra(request, request.Extra);
         return await this.CallAsync(
-                Call.Write(HttpMethod.Post, WebhooksPath, body, idempotencyKey),
+                // Never retried: only the first answer carries the signing secret, so a replay
+                // after a lost answer would hand back an endpoint without one.
+                Call.Write(HttpMethod.Post, WebhooksPath, body, idempotencyKey) with { Retryable = false },
                 reply => ToWebhookEndpoint(reply.ReadObject("webhook endpoint"), reply.RequestId),
                 cancellationToken)
             .ConfigureAwait(false);
@@ -1113,29 +1128,53 @@ public sealed class DominaiteClient : IDisposable
         => $"DominaiteClient {{ KeyId = {this._keyId}, BaseUrl = {this.BaseUrl}, Secret = [REDACTED] }}";
 
     /// <summary>
-    /// Sends one call and reads its answer with <paramref name="read"/>. Every error leaves with
-    /// the call's idempotency key and the answer's request id.
+    /// Sends one call under the retry policy and reads its answer with <paramref name="read"/>.
+    /// Every error leaves with the call's idempotency key and the answer's request id.
     /// </summary>
-    private async Task<T> CallAsync<T>(Call call, Func<ApiReply, T> read, CancellationToken cancellationToken)
+    /// <remarks>
+    /// Only a call that can be replayed safely is retried: a GET, and a POST that carries an
+    /// idempotency key. Each attempt sends the same path, body and key, with a fresh timestamp
+    /// and so a fresh signature. Only a transport failure (a timeout, a dropped connection, a 5xx
+    /// with no typed meaning on the route) and <c>PAYMENT_PROCESSING_UNAVAILABLE</c> are retried.
+    /// A 429 never is: its <see cref="DominaiteRateLimitException.RetryAfter"/> is the caller's
+    /// to honor.
+    /// </remarks>
+    private async Task<T> CallAsync<T>(
+        Call call,
+        Func<ApiReply, T> read,
+        CancellationToken cancellationToken,
+        Retries? retries = null)
     {
-        try
+        var policy = retries ?? new Retries($"{call.Method.Method} {call.Path}", this._maxRetries, BaseRetryDelay);
+        var allowed = call.Retryable ? policy.Max : 0;
+        for (var attempt = 0; ; attempt++)
         {
-            var reply = await this.SendRequestAsync(call.Method, call.Path, call.Query, call.Body, call.IdempotencyKey, cancellationToken)
-                .ConfigureAwait(false);
             try
             {
-                return read(reply);
+                var reply = await this.SendRequestAsync(call.Method, call.Path, call.Query, call.Body, call.IdempotencyKey, cancellationToken)
+                    .ConfigureAwait(false);
+                try
+                {
+                    return read(reply);
+                }
+                catch (DominaiteException error)
+                {
+                    error.RequestId ??= reply.RequestId;
+                    throw;
+                }
             }
-            catch (DominaiteException error)
+            catch (DominaiteException error) when (attempt < allowed && IsAutoRetried(error))
             {
-                error.RequestId ??= reply.RequestId;
+                this.Warn(
+                    $"dominaite-dotnet: retrying {policy.Operation} after {RetryReason(error)} "
+                    + $"(attempt {attempt + 2} of {allowed + 1})");
+                await this._sleep(this.RetryDelay(attempt, policy.BaseDelay), cancellationToken).ConfigureAwait(false);
+            }
+            catch (DominaiteException error) when (call.IdempotencyKey.Length > 0)
+            {
+                error.IdempotencyKey ??= call.IdempotencyKey;
                 throw;
             }
-        }
-        catch (DominaiteException error) when (call.IdempotencyKey.Length > 0)
-        {
-            error.IdempotencyKey ??= call.IdempotencyKey;
-            throw;
         }
     }
 
@@ -1144,6 +1183,25 @@ public sealed class DominaiteClient : IDisposable
     {
         reply.ReadNothing();
         return true;
+    }
+
+    /// <summary>
+    /// The errors the policy retries: a transport failure, or <c>PAYMENT_PROCESSING_UNAVAILABLE</c>.
+    /// The coded charge 5xx outcomes (<c>CHARGE_OUTCOME_UNKNOWN</c>, <c>CHARGE_FAILED</c>,
+    /// <c>PAYMENT_METHOD_CHARGES_DISABLED</c>) are answers, not outages, so they are not retried.
+    /// </summary>
+    private static bool IsAutoRetried(DominaiteException error)
+        => error is DominaiteTransportException
+            || string.Equals(error.Code, ErrorCodes.PaymentProcessingUnavailable, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Full jitter: a random wait between zero and <paramref name="baseDelay"/> x 2^attempt,
+    /// capped at <see cref="MaxRetryDelay"/>.
+    /// </summary>
+    private TimeSpan RetryDelay(int attempt, TimeSpan baseDelay)
+    {
+        var ceiling = Math.Min(MaxRetryDelay.TotalMilliseconds, baseDelay.TotalMilliseconds * Math.Pow(2, Math.Min(attempt, 30)));
+        return TimeSpan.FromMilliseconds(this._random() * ceiling);
     }
 
     /// <summary>
@@ -1621,22 +1679,29 @@ public sealed class DominaiteClient : IDisposable
         };
 
     /// <summary>
-    /// One call as it gets signed and sent: method, signed path, query, body and idempotency key.
+    /// One call as it gets signed and sent: method, signed path, query, body and idempotency key,
+    /// and whether the retry policy may send it again.
     /// </summary>
-    private readonly record struct Call(HttpMethod Method, string Path, string Query, string Body, string IdempotencyKey)
+    private readonly record struct Call(HttpMethod Method, string Path, string Query, string Body, string IdempotencyKey, bool Retryable)
     {
-        /// <summary>A GET: an empty body and an empty key.</summary>
+        /// <summary>A GET: an empty body and an empty key. Always safe to send again.</summary>
         public static Call Read(string path, string query = "")
-            => new(HttpMethod.Get, path, query, string.Empty, string.Empty);
+            => new(HttpMethod.Get, path, query, string.Empty, string.Empty, Retryable: true);
 
-        /// <summary>A DELETE: an empty body and an empty key.</summary>
+        /// <summary>A DELETE: an empty body and an empty key. Never retried.</summary>
         public static Call Delete(string path)
-            => new(HttpMethod.Delete, path, string.Empty, string.Empty, string.Empty);
+            => new(HttpMethod.Delete, path, string.Empty, string.Empty, string.Empty, Retryable: false);
 
-        /// <summary>A call with a body.</summary>
+        /// <summary>A call with a body. Retried only when it is a POST with an idempotency key.</summary>
         public static Call Write(HttpMethod method, string path, string body, string idempotencyKey)
-            => new(method, path, string.Empty, body, idempotencyKey);
+            => new(method, path, string.Empty, body, idempotencyKey, Retryable: method == HttpMethod.Post && idempotencyKey.Length > 0);
     }
+
+    /// <summary>
+    /// A retry policy: the name the warning uses, the number of retries after the first attempt,
+    /// and the base wait.
+    /// </summary>
+    private readonly record struct Retries(string Operation, int Max, TimeSpan BaseDelay);
 
     /// <summary>
     /// One parsed gateway answer: the HTTP status and the envelope as sent.

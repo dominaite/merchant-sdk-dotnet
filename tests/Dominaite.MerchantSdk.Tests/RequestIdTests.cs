@@ -45,6 +45,7 @@ public class RequestIdTests
         {
             BaseUrl = "https://merchant-api.test/api",
             HttpClient = new HttpClient(new FixedHandler(status, body, headerId)),
+            MaxRetries = 0,
         });
 
     private static string Success(string data, string? bodyId)

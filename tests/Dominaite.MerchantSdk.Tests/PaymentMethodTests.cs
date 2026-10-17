@@ -67,11 +67,14 @@ public class PaymentMethodTests
         => Reply.Enveloped(
             $$$"""{"transactionId":"{{{TransactionId}}}","orderId":"dom_9a8b7c6d5e4f","status":"succeeded","amount":2500,"currency":"EUR","paymentMethod":"card","storedPaymentMethod":{"id":"{{{PaymentMethodId}}}","brand":"visa","last4":"4242","expiryMonth":12,"expiryYear":2029,"status":"{{{status}}}"}}""");
 
+    // One attempt per call, so each test reads the mapping of exactly one answer. RetryTests
+    // covers the retry policy.
     private static DominaiteClient ClientFor(MockServer server)
         => new(KeyId, Secret, new DominaiteClientOptions
         {
             BaseUrl = server.BaseUrl,
             Timeout = TimeSpan.FromSeconds(10),
+            MaxRetries = 0,
         });
 
     private static ChargeRequest Charge() => new()

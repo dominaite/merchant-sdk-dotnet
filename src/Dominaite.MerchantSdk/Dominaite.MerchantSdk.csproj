@@ -25,4 +25,9 @@
     <None Include="../../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
+  <!-- The tests replace the wait and the random source of the retry policy. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Dominaite.MerchantSdk.Tests" />
+  </ItemGroup>
+
 </Project>
