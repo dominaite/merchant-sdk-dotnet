@@ -38,6 +38,10 @@
 ### Changed
 
 - A stored payment method id is lowercased before it is signed and sent.
+- A correctly signed webhook event whose `data` does not map to the typed model (for example
+  `"periodNumber":"two"`) now verifies. `Payment`, `Agreement` or `Charge` is null and `Data` keeps
+  the data as sent. It threw `DominaiteWebhookException` with `MalformedPayload` before. A body
+  that is not JSON, or has no `id` or `type`, still throws.
 
 ### Deprecated
 

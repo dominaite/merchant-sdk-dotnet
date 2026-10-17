@@ -98,16 +98,25 @@ public sealed class WebhookEvent
 
     /// <summary>
     /// The <c>data</c> of a <c>payment.*</c> or <c>verification.*</c> event, typed; null for every
-    /// other type.
+    /// other type, and null when <c>data</c> does not map to <see cref="PaymentEventData"/> (for
+    /// example a field of the wrong JSON type). <see cref="Data"/> keeps it as sent.
     /// </summary>
     [JsonIgnore]
     public PaymentEventData? Payment { get; set; }
 
-    /// <summary>The <c>data</c> of an <c>agreement.*</c> event, typed; null for every other type.</summary>
+    /// <summary>
+    /// The <c>data</c> of an <c>agreement.*</c> event, typed; null for every other type, and null
+    /// when <c>data</c> does not map to <see cref="AgreementEventData"/>. <see cref="Data"/> keeps
+    /// it as sent.
+    /// </summary>
     [JsonIgnore]
     public AgreementEventData? Agreement { get; set; }
 
-    /// <summary>The <c>data</c> of a <c>charge.*</c> event, typed; null for every other type.</summary>
+    /// <summary>
+    /// The <c>data</c> of a <c>charge.*</c> event, typed; null for every other type, and null when
+    /// <c>data</c> does not map to <see cref="ChargeEventData"/>. <see cref="Data"/> keeps it as
+    /// sent.
+    /// </summary>
     [JsonIgnore]
     public ChargeEventData? Charge { get; set; }
 

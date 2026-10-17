@@ -687,7 +687,9 @@ handlers that hold the raw request bytes.
 into a typed `WebhookEvent`: `Id`, `Type`, `ApiVersion`, `CreatedAt`, `Data` (the raw `data`
 object), plus `Payment` typed for `payment.*` and `verification.*` events, `Agreement` for
 `agreement.*` events and `Charge` for `charge.*` events. A body that verifies but is not a readable envelope throws with
-`WebhookFailureReason.MalformedPayload`.
+`WebhookFailureReason.MalformedPayload`. A readable envelope whose `data` does not map to the
+typed model, for example a field of the wrong JSON type, still verifies: `Payment`, `Agreement` or
+`Charge` is null and `Data` keeps the data as sent.
 
 ```csharp
 var evt = Webhooks.VerifyAndParse(body, signatureHeader, secret);
