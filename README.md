@@ -70,7 +70,8 @@ client object cannot leak it. The same goes for `CheckoutSession.ToString()` and
 | Production | `https://api.dominaite.com/payments` (`DominaiteClient.ProductionBaseUrl`) |
 
 The base URL is required: there is no default. A missing, empty or whitespace-only `BaseUrl`
-throws `DominaiteValidationException` when you build the client. **A sandbox key against
+throws `DominaiteValidationException` when you build the client. `DominaiteClient.DefaultBaseUrl`
+is removed in 0.6.0. Use `DominaiteClient.ProductionBaseUrl`. **A sandbox key against
 production is a guaranteed `INVALID_API_KEY`** - keys are issued per environment.
 
 The base URL's own prefix is never part of the signed path: on production you POST to
@@ -209,7 +210,9 @@ client on that base URL with a 45s timeout. `DominaiteClientOptions` takes:
 |---|---|
 | `BaseUrl` | Required. `DominaiteClient.SandboxBaseUrl` or `DominaiteClient.ProductionBaseUrl`, or your own value. Missing, empty or whitespace throws `DominaiteValidationException`. Must be `https://`; `http://` only for localhost, 127.0.0.1 and ::1. |
 | `Timeout` | Per-request timeout. Defaults to 45s (serverless cold starts can take 10+s). |
-| `UserAgentSuffix` | Appends your identifier to the SDK's User-Agent, which helps when support reads the access logs. |
+| `UserAgentSuffix` | Appends your identifier to the SDK's User-Agent after one space, which helps when support reads the access logs. The SDK sends `dominaite-dotnet/0.6.0 (dotnet 8.0.11) <suffix>`. A control character in the suffix throws `DominaiteValidationException`. |
+| `OnWarning` | Your `Action<string>` for the SDK's warnings. Defaults to `Trace.TraceWarning`. See [Logging and warnings](#logging-and-warnings). |
+| `OnDebug` | Your `Action<string>` for the debug log. Off when null, the default. |
 | `HttpClient` | Your own client, for a proxy-aware or factory-managed transport. The SDK will not dispose it, and it overrides `Timeout`. Configure its handler with `AllowAutoRedirect = false`. |
 
 One client per process is the normal shape - it owns an `HttpClient` and its connection pool.
@@ -217,6 +220,36 @@ One client per process is the normal shape - it owns an `HttpClient` and its con
 The client the SDK builds for itself never follows redirects, and any 3xx is treated as a hard,
 non-retryable error. The Dominaite API never redirects, so a 3xx means something in front of it is
 answering, and following it would replay your signed request at whatever host the redirect names.
+
+## Logging and warnings
+
+The SDK writes nothing by itself except warnings, and it has no logging dependency. Pass
+callbacks to route both into your own logger:
+
+```csharp
+using var client = new DominaiteClient(keyId, secret, new DominaiteClientOptions
+{
+    BaseUrl = DominaiteClient.SandboxBaseUrl,
+    OnWarning = message => logger.LogWarning("{Message}", message),
+    OnDebug = line => logger.LogDebug("{Line}", line),   // leave null in production
+});
+```
+
+- **Warnings** go to `OnWarning`, or to `Trace.TraceWarning` when you set none:
+  - the API's `Dominaite-Sdk-Notice` response header, which says this SDK version is old.
+    You get it once per distinct notice per client, for example
+    `dominaite-dotnet 0.6.0 is deprecated; upgrade to 0.7.0 (sunset 2027-01-31). https://...`.
+    The SDK reads it on every response, errors included. No header means no warning.
+  - each retry in `CreateCheckoutSessionWithRetryAsync`, with the reason and the attempt.
+  - a `PingAsync` clock skew over 60 seconds. Requests fail at 300.
+- **Debug** is off by default. Set `OnDebug` and you get one line per request:
+  `dominaite-dotnet: POST /merchant-api/checkout/sessions 200 182ms request_id=... idempotency_key=...`.
+  That is the method, the signed path, the status (`error` for a network failure), the time,
+  the `Dominaite-Request-Id` response header when the API sent one, and the idempotency key
+  when the call had one. Give support the request id to find a call.
+- **Never logged**: the secret, the signature, the cashier token, query strings, and request or
+  response bodies.
+- An exception thrown by your callback is dropped. It never fails the call.
 
 ## Amounts are minor units
 

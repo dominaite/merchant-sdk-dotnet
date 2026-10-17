@@ -15,6 +15,21 @@
   and ::1, so a local mock server still works. Anything else fails construction with
   `DominaiteValidationException`.
 
+### Added
+
+- The User-Agent is now `dominaite-dotnet/<version> (dotnet <runtime version>)`, then
+  `UserAgentSuffix` after one space. No operating system. A suffix with a control character
+  fails construction with `DominaiteValidationException`.
+- `DominaiteClientOptions.OnWarning`: an `Action<string>` for the SDK's warnings. It defaults to
+  `Trace.TraceWarning`. It gets the API's `Dominaite-Sdk-Notice` header (once per distinct
+  value), each retry in `CreateCheckoutSessionWithRetryAsync`, and a ping clock skew over 60
+  seconds.
+- `DominaiteClientOptions.OnDebug`: turns on a debug log, one line per request with the method,
+  the signed path, the status, the time, the `Dominaite-Request-Id` response header and the
+  idempotency key. Off by default.
+- No warning or debug line holds the secret, a signature, a cashier token, a query string or a
+  body. An exception thrown by a callback is dropped.
+
 ## 0.5.2
 
 ### Added
