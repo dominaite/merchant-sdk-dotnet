@@ -118,6 +118,9 @@ public sealed class DominaiteClient : IDisposable
     /// </summary>
     private static readonly Regex IdSegmentPattern = new("^[A-Za-z0-9_-]{1,100}$", RegexOptions.CultureInvariant);
 
+    /// <summary>An ISO 4217 code as the gateway takes it: three upper-case letters.</summary>
+    private static readonly Regex CurrencyPattern = new("^[A-Z]{3}$", RegexOptions.CultureInvariant);
+
     /// <summary>What a 204 unwraps to: a payload with nothing in it.</summary>
     private static readonly JsonElement EmptyPayload = ParseEmptyObject();
 
@@ -739,6 +742,13 @@ public sealed class DominaiteClient : IDisposable
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        // An unset Amount is 0, which the gateway refuses.
+        if (request.Amount <= 0)
+        {
+            throw new DominaiteValidationException(
+                "Amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR)");
+        }
+
         var idempotencyKey = IdempotencyKeys.Validate(request.IdempotencyKey);
         var body = SerializeWithExtra(request, request.Extra);
         var data = await this.CreateAsync(PlansPath, body, idempotencyKey, "plan", cancellationToken)
@@ -1051,6 +1061,7 @@ public sealed class DominaiteClient : IDisposable
     /// <param name="request">The window, and optionally a status, a page size and a cursor.</param>
     /// <param name="cancellationToken">Cancels the call.</param>
     /// <returns>One page of payments.</returns>
+    /// <exception cref="DominaiteValidationException">From or To is not set; nothing was sent.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
     /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the <c>transactions:read</c> scope.</exception>
     /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then call again.</exception>
@@ -1866,6 +1877,14 @@ public sealed class DominaiteClient : IDisposable
     private static string SerializeBody(CheckoutSessionRequest request)
     {
         ValidateMoneyParams(request.Amount, request.Currency, request.OrderReference, request.VerifyOnly == true);
+
+        // The session route requires all three consent fields; an unset AcceptedAt would be
+        // omitted and refused.
+        if (request.Consent is { AcceptedAt: null })
+        {
+            throw new DominaiteValidationException("Consent.AcceptedAt is required: set it to when the payer accepted");
+        }
+
         return SerializeWithExtra(request, request.Extra);
     }
 
@@ -1938,6 +1957,11 @@ public sealed class DominaiteClient : IDisposable
         if (string.IsNullOrWhiteSpace(currency))
         {
             throw new DominaiteValidationException("Missing required parameter: Currency");
+        }
+
+        if (!CurrencyPattern.IsMatch(currency))
+        {
+            throw new DominaiteValidationException("Currency must be an ISO 4217 code in upper case, e.g. EUR");
         }
 
         if (string.IsNullOrWhiteSpace(orderReference))
@@ -2040,6 +2064,12 @@ public sealed class DominaiteClient : IDisposable
     /// </summary>
     private static string TransactionQuery(ListTransactionsRequest request)
     {
+        // An unset From or To is year 1, which the gateway refuses.
+        if (request.From == default || request.To == default)
+        {
+            throw new DominaiteValidationException("From and To are required: set the window to list");
+        }
+
         var parameters = new List<KeyValuePair<string, string>>
         {
             new("from", QueryInstant(request.From)),
