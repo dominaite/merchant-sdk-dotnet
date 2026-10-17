@@ -66,11 +66,13 @@ client object cannot leak it. The same goes for `CheckoutSession.ToString()` and
 
 | Environment | Base URL |
 |---|---|
-| Production | `https://api.dominaite.com/payments` (the default) |
-| Dev / staging | the base URL of that environment |
+| Sandbox | `https://api.staging.dominaite.com/payments` (`DominaiteClient.SandboxBaseUrl`) |
+| Production | `https://api.dominaite.com/payments` (`DominaiteClient.ProductionBaseUrl`) |
 
-Confirm the host for your environment before the first call. **A dev key against production is a
-guaranteed `INVALID_API_KEY`** - keys are issued per environment.
+The base URL is required: there is no default. A missing, empty or whitespace-only `BaseUrl`
+throws `DominaiteValidationException` when you build the client. `DominaiteClient.DefaultBaseUrl`
+is removed in 0.6.0. Use `DominaiteClient.ProductionBaseUrl`. **A sandbox key against
+production is a guaranteed `INVALID_API_KEY`** - keys are issued per environment.
 
 The base URL's own prefix is never part of the signed path: on production you POST to
 `https://api.dominaite.com/payments/merchant-api/checkout/sessions` but you sign
@@ -81,9 +83,8 @@ The base URL's own prefix is never part of the signed path: on production you PO
 ```sh
 export DOMINAITE_KEY_ID=dmk_...      # Website integration tab
 export DOMINAITE_SECRET=dms_...      # shown once when you generated the key
-# Production needs no DOMINAITE_BASE_URL.
-# For a test environment, set it to that environment's base URL:
-# export DOMINAITE_BASE_URL=https://...
+# Required. The sandbox, or https://api.dominaite.com/payments for production:
+export DOMINAITE_BASE_URL=https://api.staging.dominaite.com/payments
 ```
 
 ```csharp
@@ -94,7 +95,7 @@ using var client = new DominaiteClient(
     Environment.GetEnvironmentVariable("DOMINAITE_SECRET")!,
     new DominaiteClientOptions
     {
-        // An unset variable is null, and a null value keeps the production default.
+        // Required. An unset variable is null, and the constructor throws on it.
         BaseUrl = Environment.GetEnvironmentVariable("DOMINAITE_BASE_URL"),
     });
 
@@ -202,14 +203,16 @@ signing; a 503 means retry later. Never both at once.
 
 ## Client options
 
-`new DominaiteClient(keyId, secret)` gives you production with a 45s timeout.
-`DominaiteClientOptions` takes more:
+`new DominaiteClient(keyId, secret, new DominaiteClientOptions { BaseUrl = ... })` gives you a
+client on that base URL with a 45s timeout. `DominaiteClientOptions` takes:
 
 | Option | What |
 |---|---|
-| `BaseUrl` | Point at a non-production environment. Empty and whitespace-only values are ignored, so an unset env var still gives you production. |
+| `BaseUrl` | Required. `DominaiteClient.SandboxBaseUrl` or `DominaiteClient.ProductionBaseUrl`, or your own value. Missing, empty or whitespace throws `DominaiteValidationException`. Must be `https://`; `http://` only for localhost, 127.0.0.1 and ::1. |
 | `Timeout` | Per-request timeout. Defaults to 45s (serverless cold starts can take 10+s). |
-| `UserAgentSuffix` | Appends your identifier to the SDK's User-Agent, which helps when support reads the access logs. |
+| `UserAgentSuffix` | Appends your identifier to the SDK's User-Agent after one space, which helps when support reads the access logs. The SDK sends `dominaite-dotnet/0.6.0 (dotnet 8.0.11) <suffix>`. A control character in the suffix throws `DominaiteValidationException`. |
+| `OnWarning` | Your `Action<string>` for the SDK's warnings. Defaults to `Trace.TraceWarning`. See [Logging and warnings](#logging-and-warnings). |
+| `OnDebug` | Your `Action<string>` for the debug log. Off when null, the default. |
 | `HttpClient` | Your own client, for a proxy-aware or factory-managed transport. The SDK will not dispose it, and it overrides `Timeout`. Configure its handler with `AllowAutoRedirect = false`. |
 
 One client per process is the normal shape - it owns an `HttpClient` and its connection pool.
@@ -217,6 +220,36 @@ One client per process is the normal shape - it owns an `HttpClient` and its con
 The client the SDK builds for itself never follows redirects, and any 3xx is treated as a hard,
 non-retryable error. The Dominaite API never redirects, so a 3xx means something in front of it is
 answering, and following it would replay your signed request at whatever host the redirect names.
+
+## Logging and warnings
+
+The SDK writes nothing by itself except warnings, and it has no logging dependency. Pass
+callbacks to route both into your own logger:
+
+```csharp
+using var client = new DominaiteClient(keyId, secret, new DominaiteClientOptions
+{
+    BaseUrl = DominaiteClient.SandboxBaseUrl,
+    OnWarning = message => logger.LogWarning("{Message}", message),
+    OnDebug = line => logger.LogDebug("{Line}", line),   // leave null in production
+});
+```
+
+- **Warnings** go to `OnWarning`, or to `Trace.TraceWarning` when you set none:
+  - the API's `Dominaite-Sdk-Notice` response header, which says this SDK version is old.
+    You get it once per distinct notice per client, for example
+    `dominaite-dotnet 0.6.0 is deprecated; upgrade to 0.7.0 (sunset 2027-01-31). https://...`.
+    The SDK reads it on every response, errors included. No header means no warning.
+  - each retry in `CreateCheckoutSessionWithRetryAsync`, with the reason and the attempt.
+  - a `PingAsync` clock skew over 60 seconds. Requests fail at 300.
+- **Debug** is off by default. Set `OnDebug` and you get one line per request:
+  `dominaite-dotnet: POST /merchant-api/checkout/sessions 200 182ms request_id=... idempotency_key=...`.
+  That is the method, the signed path, the status (`error` for a network failure), the time,
+  the `Dominaite-Request-Id` response header when the API sent one, and the idempotency key
+  when the call had one. Give support the request id to find a call.
+- **Never logged**: the secret, the signature, the cashier token, query strings, and request or
+  response bodies.
+- An exception thrown by your callback is dropped. It never fails the call.
 
 ## Amounts are minor units
 
