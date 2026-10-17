@@ -289,6 +289,29 @@ public class WebhookEventTests
     }
 
     [Fact]
+    public void AChargeEventCarriesItsCardBrandAndLast4Typed()
+    {
+        var method = Assert.IsType<ChargeEventPaymentMethod>(Parse(PlatformChargeBody).Charge!.PaymentMethod);
+
+        Assert.Equal("visa", method.Brand);
+        Assert.Equal("4242", method.Last4);
+    }
+
+    [Theory]
+    [InlineData("\"paymentMethod\":null")]
+    [InlineData("\"paymentMethod\":{\"brand\":null,\"last4\":null}")]
+    public void AChargeEventWithANullCardOrNullCardFieldsStillParses(string paymentMethod)
+    {
+        var body = OneOffChargeBody.Replace("\"paymentMethod\":{\"brand\":\"visa\",\"last4\":\"4242\"}", paymentMethod, StringComparison.Ordinal);
+        Assert.NotEqual(OneOffChargeBody, body);
+
+        var charge = Parse(body).Charge!;
+
+        Assert.Null(charge.PaymentMethod?.Brand);
+        Assert.Null(charge.PaymentMethod?.Last4);
+    }
+
+    [Fact]
     public void ASequenceOfZeroIsKeptAsZero()
     {
         var body = AgreementBody.Replace("\"sequence\":3", "\"sequence\":0", StringComparison.Ordinal);

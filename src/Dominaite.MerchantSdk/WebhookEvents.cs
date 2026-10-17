@@ -352,6 +352,12 @@ public sealed class ChargeEventData
     /// <summary>ISO 4217 code.</summary>
     public string Currency { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The card the charge was placed on, as its brand and last four digits. Null when the
+    /// delivery has none.
+    /// </summary>
+    public ChargeEventPaymentMethod? PaymentMethod { get; set; }
+
     /// <summary>Your order reference, as sent on the charge.</summary>
     public string? OrderReference { get; set; }
 
@@ -394,4 +400,17 @@ public sealed class ChargeEventData
     /// <summary>The <c>data</c> object as sent, for fields this class does not model yet.</summary>
     [JsonIgnore]
     public JsonElement Raw { get; set; }
+}
+
+/// <summary>
+/// The card on a <c>charge.*</c> event (<see cref="ChargeEventData.PaymentMethod"/>). Either field
+/// can be null: webhooks send explicit nulls.
+/// </summary>
+public sealed class ChargeEventPaymentMethod
+{
+    /// <summary>Lower-cased card brand, e.g. <c>visa</c>.</summary>
+    public string? Brand { get; set; }
+
+    /// <summary>Last four digits of the card.</summary>
+    public string? Last4 { get; set; }
 }
