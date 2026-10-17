@@ -27,7 +27,8 @@
 - `RequestId` on every result and on `DominaiteException`: the `Dominaite-Request-Id` header, else
   the body's `metadata.requestId`. The debug line uses the same fallback.
 - `IdempotencyKey` is now set on the errors of every call that sends one, not only session create.
-- `ChargeEventData.PaymentMethod` (`Brand`, `Last4`) on `charge.*` webhook events.
+- `ChargeEventData.PaymentMethod` (`Brand`, `Last4`) on `charge.*` webhook events. A value with an
+  unexpected shape reads as null and never fails a signed event; `Raw` keeps it as sent.
 - Error-code constants for every code the gateway names: `AuthErrorCodes`,
   `SubscriptionErrorCodes`, `WebhookEndpointErrorCodes`, `ValidationErrorCodes`,
   `ErrorCodes.Idempotency`, `ErrorCodes.Transient`, the subscription session refusals in
