@@ -12,13 +12,15 @@ public sealed class DominaiteClientOptions
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(45);
 
     /// <summary>
-    /// The API to talk to. Empty and whitespace-only values are ignored, so an unset environment
-    /// variable still gives you production. Trailing slashes are trimmed.
+    /// The API to talk to. Required: there is no default. Trailing slashes are trimmed.
     /// </summary>
     /// <remarks>
-    /// Dev and staging are the raw function hosts, whose Azure Functions route prefix is
-    /// <c>/api</c>; production is <c>https://api.dominaite.com/payments</c>. The base URL's own
-    /// prefix is never part of the signed path.
+    /// Use <see cref="DominaiteClient.SandboxBaseUrl"/> (<c>https://api.staging.dominaite.com/payments</c>)
+    /// with sandbox keys, or <see cref="DominaiteClient.ProductionBaseUrl"/>
+    /// (<c>https://api.dominaite.com/payments</c>) with live keys. A missing, empty or
+    /// whitespace-only value fails construction with a <see cref="DominaiteValidationException"/>.
+    /// The URL must be <c>https://</c>; plain <c>http://</c> is accepted only for localhost,
+    /// 127.0.0.1 and ::1. The base URL's own prefix is never part of the signed path.
     /// </remarks>
     public string? BaseUrl { get; set; }
 

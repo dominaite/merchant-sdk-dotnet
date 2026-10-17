@@ -4,25 +4,27 @@ using Dominaite.MerchantSdk;
 //
 //   export DOMINAITE_KEY_ID=dmk_...
 //   export DOMINAITE_SECRET=dms_...
-//   export DOMINAITE_BASE_URL=https://...   # a test environment only
+//   export DOMINAITE_BASE_URL=https://api.staging.dominaite.com/payments   # required
 //   dotnet run --project examples/CreateSession
 //
-// Leave DOMINAITE_BASE_URL unset for production. A dev key against production is a guaranteed
-// INVALID_API_KEY - keys are issued per environment.
+// DOMINAITE_BASE_URL is required: the sandbox above, or https://api.dominaite.com/payments for
+// production. A sandbox key against production is a guaranteed INVALID_API_KEY - keys are issued
+// per environment.
 
 var keyId = Environment.GetEnvironmentVariable("DOMINAITE_KEY_ID");
 var secret = Environment.GetEnvironmentVariable("DOMINAITE_SECRET");
 
-if (string.IsNullOrWhiteSpace(keyId) || string.IsNullOrWhiteSpace(secret))
+var baseUrl = Environment.GetEnvironmentVariable("DOMINAITE_BASE_URL");
+
+if (string.IsNullOrWhiteSpace(keyId) || string.IsNullOrWhiteSpace(secret) || string.IsNullOrWhiteSpace(baseUrl))
 {
-    Console.Error.WriteLine("Set DOMINAITE_KEY_ID and DOMINAITE_SECRET first.");
+    Console.Error.WriteLine("Set DOMINAITE_KEY_ID, DOMINAITE_SECRET and DOMINAITE_BASE_URL first.");
     return 1;
 }
 
 using var client = new DominaiteClient(keyId, secret, new DominaiteClientOptions
 {
-    // An unset variable is null, and a null value keeps the production default.
-    BaseUrl = Environment.GetEnvironmentVariable("DOMINAITE_BASE_URL"),
+    BaseUrl = baseUrl,
 });
 
 try

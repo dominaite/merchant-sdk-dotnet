@@ -66,11 +66,12 @@ client object cannot leak it. The same goes for `CheckoutSession.ToString()` and
 
 | Environment | Base URL |
 |---|---|
-| Production | `https://api.dominaite.com/payments` (the default) |
-| Dev / staging | the base URL of that environment |
+| Sandbox | `https://api.staging.dominaite.com/payments` (`DominaiteClient.SandboxBaseUrl`) |
+| Production | `https://api.dominaite.com/payments` (`DominaiteClient.ProductionBaseUrl`) |
 
-Confirm the host for your environment before the first call. **A dev key against production is a
-guaranteed `INVALID_API_KEY`** - keys are issued per environment.
+The base URL is required: there is no default. A missing, empty or whitespace-only `BaseUrl`
+throws `DominaiteValidationException` when you build the client. **A sandbox key against
+production is a guaranteed `INVALID_API_KEY`** - keys are issued per environment.
 
 The base URL's own prefix is never part of the signed path: on production you POST to
 `https://api.dominaite.com/payments/merchant-api/checkout/sessions` but you sign
@@ -81,9 +82,8 @@ The base URL's own prefix is never part of the signed path: on production you PO
 ```sh
 export DOMINAITE_KEY_ID=dmk_...      # Website integration tab
 export DOMINAITE_SECRET=dms_...      # shown once when you generated the key
-# Production needs no DOMINAITE_BASE_URL.
-# For a test environment, set it to that environment's base URL:
-# export DOMINAITE_BASE_URL=https://...
+# Required. The sandbox, or https://api.dominaite.com/payments for production:
+export DOMINAITE_BASE_URL=https://api.staging.dominaite.com/payments
 ```
 
 ```csharp
@@ -94,7 +94,7 @@ using var client = new DominaiteClient(
     Environment.GetEnvironmentVariable("DOMINAITE_SECRET")!,
     new DominaiteClientOptions
     {
-        // An unset variable is null, and a null value keeps the production default.
+        // Required. An unset variable is null, and the constructor throws on it.
         BaseUrl = Environment.GetEnvironmentVariable("DOMINAITE_BASE_URL"),
     });
 
@@ -202,12 +202,12 @@ signing; a 503 means retry later. Never both at once.
 
 ## Client options
 
-`new DominaiteClient(keyId, secret)` gives you production with a 45s timeout.
-`DominaiteClientOptions` takes more:
+`new DominaiteClient(keyId, secret, new DominaiteClientOptions { BaseUrl = ... })` gives you a
+client on that base URL with a 45s timeout. `DominaiteClientOptions` takes:
 
 | Option | What |
 |---|---|
-| `BaseUrl` | Point at a non-production environment. Empty and whitespace-only values are ignored, so an unset env var still gives you production. |
+| `BaseUrl` | Required. `DominaiteClient.SandboxBaseUrl` or `DominaiteClient.ProductionBaseUrl`, or your own value. Missing, empty or whitespace throws `DominaiteValidationException`. Must be `https://`; `http://` only for localhost, 127.0.0.1 and ::1. |
 | `Timeout` | Per-request timeout. Defaults to 45s (serverless cold starts can take 10+s). |
 | `UserAgentSuffix` | Appends your identifier to the SDK's User-Agent, which helps when support reads the access logs. |
 | `HttpClient` | Your own client, for a proxy-aware or factory-managed transport. The SDK will not dispose it, and it overrides `Timeout`. Configure its handler with `AllowAutoRedirect = false`. |

@@ -25,8 +25,11 @@ namespace Dominaite.MerchantSdk;
 [DebuggerDisplay("DominaiteClient {BaseUrl,nq} (secret redacted)")]
 public sealed class DominaiteClient : IDisposable
 {
-    /// <summary>The production merchant API.</summary>
-    public const string DefaultBaseUrl = "https://api.dominaite.com/payments";
+    /// <summary>The sandbox merchant API. Use it with your sandbox keys.</summary>
+    public const string SandboxBaseUrl = "https://api.staging.dominaite.com/payments";
+
+    /// <summary>The production merchant API. Use it with your live keys.</summary>
+    public const string ProductionBaseUrl = "https://api.dominaite.com/payments";
 
     /// <summary>
     /// The canonical path that gets signed. POST creates a session; GET
@@ -117,10 +120,14 @@ public sealed class DominaiteClient : IDisposable
     /// </summary>
     /// <param name="keyId">Your API key id (<c>dmk_...</c>). Identifies you; not secret by itself.</param>
     /// <param name="secret">Your API secret (<c>dms_...</c>). Server-side only.</param>
-    /// <param name="options">Base URL, timeout, User-Agent suffix, or your own HttpClient.</param>
+    /// <param name="options">
+    /// The base URL (required), and optionally the timeout, a User-Agent suffix or your own
+    /// HttpClient.
+    /// </param>
     /// <exception cref="DominaiteValidationException">
     /// Either credential has the wrong prefix, which catches a swapped key id and secret before
-    /// anything is sent.
+    /// anything is sent. Also when the base URL is missing, empty or whitespace, or is not
+    /// <c>https://</c> outside loopback.
     /// </exception>
     public DominaiteClient(string keyId, string secret, DominaiteClientOptions? options = null)
     {
@@ -137,13 +144,21 @@ public sealed class DominaiteClient : IDisposable
             throw new DominaiteValidationException("secret must start with dms_");
         }
 
+        // There is no default base URL. A fallback to production would turn an unset environment
+        // variable into sandbox keys sent to production.
+        var baseUrl = options?.BaseUrl?.Trim().TrimEnd('/');
+        if (string.IsNullOrEmpty(baseUrl))
+        {
+            throw new DominaiteValidationException(
+                $"BaseUrl is required. Use {SandboxBaseUrl} for the sandbox or {ProductionBaseUrl} for production.");
+        }
+
+        RequireEncryptedTransport(baseUrl);
         options ??= new DominaiteClientOptions();
 
         this._keyId = keyId;
         this._secret = secret;
-
-        var baseUrl = options.BaseUrl?.Trim().TrimEnd('/');
-        this.BaseUrl = string.IsNullOrEmpty(baseUrl) ? DefaultBaseUrl : baseUrl;
+        this.BaseUrl = baseUrl;
 
         this.UserAgent = string.IsNullOrWhiteSpace(options.UserAgentSuffix)
             ? $"dominaite-dotnet/{Version}"
@@ -167,7 +182,7 @@ public sealed class DominaiteClient : IDisposable
         }
     }
 
-    /// <summary>The base URL this client is pointed at.</summary>
+    /// <summary>The base URL this client is pointed at, without a trailing slash.</summary>
     public string BaseUrl { get; }
 
     /// <summary>The User-Agent this client sends.</summary>
@@ -1250,6 +1265,34 @@ public sealed class DominaiteClient : IDisposable
 
             return reply;
         }
+    }
+
+    /// <summary>
+    /// Refuses a base URL that would put the signed request on the wire in clear text. Plain
+    /// <c>http://</c> is allowed only for localhost, 127.0.0.1 and ::1, for local mock servers.
+    /// </summary>
+    private static void RequireEncryptedTransport(string baseUrl)
+    {
+        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
+        {
+            throw new DominaiteValidationException($"BaseUrl is not a valid URL: {baseUrl}");
+        }
+
+        if (uri.Scheme == Uri.UriSchemeHttps)
+        {
+            return;
+        }
+
+        var host = uri.Host.Trim('[', ']');
+        if (uri.Scheme == Uri.UriSchemeHttp
+            && (host.Equals("localhost", StringComparison.OrdinalIgnoreCase) || host == "127.0.0.1" || host == "::1"))
+        {
+            return;
+        }
+
+        throw new DominaiteValidationException(
+            "BaseUrl must use https:// (http:// is allowed only for localhost, 127.0.0.1 and ::1). "
+            + "Anywhere else it would send your key id, signature and request body in clear text.");
     }
 
     /// <summary>

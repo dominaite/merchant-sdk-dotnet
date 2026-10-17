@@ -528,7 +528,7 @@ public class ClientTests
     [Fact]
     public void TheSecretNeverAppearsInToString()
     {
-        using var client = new DominaiteClient(KeyId, Secret);
+        using var client = new DominaiteClient(KeyId, Secret, new DominaiteClientOptions { BaseUrl = DominaiteClient.SandboxBaseUrl });
 
         var text = client.ToString();
 
@@ -553,7 +553,7 @@ public class ClientTests
     [InlineData(KeyId, "nope_secret", "secret")]
     public void SwappedOrMalformedCredentialsAreRejectedBeforeAnythingIsSent(string keyId, string secret, string expected)
     {
-        var error = Assert.Throws<DominaiteValidationException>(() => new DominaiteClient(keyId, secret));
+        var error = Assert.Throws<DominaiteValidationException>(() => new DominaiteClient(keyId, secret, new DominaiteClientOptions { BaseUrl = DominaiteClient.SandboxBaseUrl }));
         Assert.Contains(expected, error.Message, StringComparison.Ordinal);
     }
 
@@ -574,14 +574,66 @@ public class ClientTests
         Assert.Empty(server.Requests);
     }
 
-    [Fact]
-    public void AnEmptyBaseUrlKeepsProduction()
-    {
-        using var unset = new DominaiteClient(KeyId, Secret, new DominaiteClientOptions { BaseUrl = "   " });
-        Assert.Equal(DominaiteClient.DefaultBaseUrl, unset.BaseUrl);
+    public static TheoryData<string?> MissingBaseUrls => new() { null, "", "   ", "\t\n", "/" };
 
-        using var trailing = new DominaiteClient(KeyId, Secret, new DominaiteClientOptions { BaseUrl = "https://example.test/api/" });
+    [Theory]
+    [MemberData(nameof(MissingBaseUrls))]
+    public void AMissingBaseUrlIsRejectedInsteadOfFallingBackToProduction(string? baseUrl)
+    {
+        var error = Assert.Throws<DominaiteValidationException>(
+            () => new DominaiteClient(KeyId, Secret, new DominaiteClientOptions { BaseUrl = baseUrl }));
+
+        Assert.Equal(
+            "BaseUrl is required. Use https://api.staging.dominaite.com/payments for the sandbox or https://api.dominaite.com/payments for production.",
+            error.Message);
+    }
+
+    [Fact]
+    public void NoOptionsAtAllIsAMissingBaseUrl()
+    {
+        var error = Assert.Throws<DominaiteValidationException>(() => new DominaiteClient(KeyId, Secret));
+        Assert.StartsWith("BaseUrl is required.", error.Message, StringComparison.Ordinal);
+
+        var nullOptions = Assert.Throws<DominaiteValidationException>(() => new DominaiteClient(KeyId, Secret, null));
+        Assert.StartsWith("BaseUrl is required.", nullOptions.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(DominaiteClient.SandboxBaseUrl, "https://api.staging.dominaite.com/payments")]
+    [InlineData(DominaiteClient.ProductionBaseUrl, "https://api.dominaite.com/payments")]
+    public void EachNamedBaseUrlBuildsAClientOnThatUrl(string baseUrl, string expected)
+    {
+        using var client = new DominaiteClient(KeyId, Secret, new DominaiteClientOptions { BaseUrl = baseUrl });
+        Assert.Equal(expected, client.BaseUrl);
+    }
+
+    [Fact]
+    public void AnExplicitBaseUrlIsTrimmed()
+    {
+        using var trailing = new DominaiteClient(KeyId, Secret, new DominaiteClientOptions { BaseUrl = "  https://example.test/api/  " });
         Assert.Equal("https://example.test/api", trailing.BaseUrl);
+    }
+
+    [Theory]
+    [InlineData("http://api.dominaite.com/payments")]
+    [InlineData("http://10.0.0.5/api")]
+    [InlineData("ftp://example.test/api")]
+    [InlineData("api.dominaite.com/payments")]
+    public void ABaseUrlWithoutHttpsOutsideLoopbackIsRejected(string baseUrl)
+    {
+        Assert.Throws<DominaiteValidationException>(
+            () => new DominaiteClient(KeyId, Secret, new DominaiteClientOptions { BaseUrl = baseUrl }));
+    }
+
+    [Theory]
+    [InlineData("http://localhost:8080/api")]
+    [InlineData("http://LOCALHOST/api")]
+    [InlineData("http://127.0.0.1:9/api")]
+    [InlineData("http://[::1]:9/api")]
+    public void PlainHttpIsAllowedOnLoopback(string baseUrl)
+    {
+        using var client = new DominaiteClient(KeyId, Secret, new DominaiteClientOptions { BaseUrl = baseUrl });
+        Assert.Equal(baseUrl, client.BaseUrl);
     }
 
     [Fact]
