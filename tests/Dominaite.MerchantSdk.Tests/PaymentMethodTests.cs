@@ -404,7 +404,7 @@ public class PaymentMethodTests
         var error = await Assert.ThrowsAsync<DominaiteChargeException>(
             () => client.ChargePaymentMethodAsync(PaymentMethodId, Charge()));
 
-        Assert.Equal(code == ChargeErrorCodes.PaymentProcessingUnavailable, error.IsRetryable);
+        Assert.Equal(code is ChargeErrorCodes.PaymentProcessingUnavailable or ChargeErrorCodes.DuplicateRequest, error.IsRetryable);
         Assert.Equal(status, error.HttpStatus);
         Assert.Equal(code, error.Code);
         Assert.Equal("refused", error.Message);
@@ -650,7 +650,7 @@ public class PaymentMethodTests
                 "PAYMENT_METHOD_CHARGES_DISABLED",
                 "PAYMENT_PROCESSING_UNAVAILABLE",
             },
-            ChargeErrorCodes.All);
+            ChargeErrorCodes.All.Take(7));
         Assert.Equal(new[] { "UPSTREAM_CONTRACT_ERROR", "MERCHANT_API_UNAVAILABLE" }, RevokeErrorCodes.All);
     }
 

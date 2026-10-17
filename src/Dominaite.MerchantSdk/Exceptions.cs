@@ -108,6 +108,28 @@ public sealed class DominaiteRefusalException : DominaiteException
 }
 
 /// <summary>
+/// The HTTP 401 codes. Each one arrives as a <see cref="DominaiteAuthException"/> and none is
+/// retryable.
+/// </summary>
+public static class AuthErrorCodes
+{
+    /// <summary>The key id is unknown, malformed or revoked, or it belongs to another environment.</summary>
+    public const string InvalidApiKey = "INVALID_API_KEY";
+
+    /// <summary>The signature does not match: check the secret, the signed path and the body bytes.</summary>
+    public const string InvalidSignature = "INVALID_SIGNATURE";
+
+    /// <summary>The <c>X-Timestamp</c> is more than 300 seconds away from the server clock.</summary>
+    public const string TimestampOutOfRange = "TIMESTAMP_OUT_OF_RANGE";
+
+    /// <summary>The caller's IP address is not on the key's allowlist.</summary>
+    public const string IpNotAllowed = "IP_NOT_ALLOWED";
+
+    /// <summary>Every 401 code above, in the order the integration contract lists them.</summary>
+    public static IReadOnlyList<string> All { get; } = [InvalidApiKey, InvalidSignature, TimestampOutOfRange, IpNotAllowed];
+}
+
+/// <summary>
 /// The API rejected your credentials or signature (HTTP 401). Not retryable: fix the key id,
 /// the secret, the server clock, or the caller allowlist.
 /// </summary>
@@ -324,7 +346,65 @@ public static class ErrorCodes
     /// <summary>The key was already used with a different body (amount, currency, storefront). Use a fresh key.</summary>
     public const string IdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED";
 
-    /// <summary>The session refusal codes, in the order the canonical contract lists them.</summary>
+    /// <summary>
+    /// HTTP 400 on every keyed write: the <c>Idempotency-Key</c> header is missing or longer than
+    /// 100 characters. The SDK checks the key first, so you see this only from your own HTTP code.
+    /// </summary>
+    public const string IdempotencyKeyRequired = "IDEMPOTENCY_KEY_REQUIRED";
+
+    /// <summary>
+    /// HTTP 503: the API cannot serve the call right now. Nothing was done. Arrives as a
+    /// retryable <see cref="DominaiteTransportException"/>, except on a revoke.
+    /// </summary>
+    public const string MerchantApiUnavailable = "MERCHANT_API_UNAVAILABLE";
+
+    /// <summary>Session refusal: the <c>agreementId</c> names no agreement of yours.</summary>
+    public const string AgreementNotFound = "AGREEMENT_NOT_FOUND";
+
+    /// <summary>
+    /// Session refusal: the agreement is already active, cancelled, completed or failed, so there is
+    /// no first payment left to take.
+    /// </summary>
+    public const string AgreementNotPending = "AGREEMENT_NOT_PENDING";
+
+    /// <summary>Session refusal: the amount or the currency differs from the agreement's own.</summary>
+    public const string AgreementAmountMismatch = "AGREEMENT_AMOUNT_MISMATCH";
+
+    /// <summary>
+    /// Session refusal: neither the request nor the agreement carries platform consent. Send
+    /// <see cref="CheckoutSessionRequest.Consent"/>.
+    /// </summary>
+    public const string AgreementConsentRequired = "AGREEMENT_CONSENT_REQUIRED";
+
+    /// <summary>
+    /// Session refusal: a session for this agreement is already open;
+    /// <see cref="DominaiteRefusalException.TransactionId"/> names it.
+    /// </summary>
+    public const string AgreementSessionOpen = "AGREEMENT_SESSION_OPEN";
+
+    /// <summary>
+    /// Session refusal: the session bound to this agreement was already paid while the agreement is
+    /// still pending. Read the status of the named transaction; do not mint again.
+    /// </summary>
+    public const string AgreementAlreadyPaid = "AGREEMENT_ALREADY_PAID";
+
+    /// <summary>
+    /// Session refusal: the agreement has a <c>maxAmountPerPeriod</c>, and a session can take the
+    /// first payment of a fixed-amount agreement only.
+    /// </summary>
+    public const string AgreementVariableAmountUnsupported = "AGREEMENT_VARIABLE_AMOUNT_UNSUPPORTED";
+
+    /// <summary>
+    /// Session refusal: subscriptions are not switched on for your account yet. Ask Dominaite
+    /// support; do not retry on a schedule.
+    /// </summary>
+    public const string SubscriptionsNotEnabled = "SUBSCRIPTIONS_NOT_ENABLED";
+
+    /// <summary>
+    /// The session refusal codes: an HTTP 200 whose <c>data.success</c> is false. The first five
+    /// are in the order the canonical contract lists them; the subscription session codes follow.
+    /// Each one arrives as a <see cref="DominaiteRefusalException"/>.
+    /// </summary>
     public static IReadOnlyList<string> SessionRefusals { get; } =
     [
         PaymentProcessingUnavailable,
@@ -332,7 +412,31 @@ public static class ErrorCodes
         AlreadyProcessed,
         IdempotencyKeyReused,
         PriorAttemptFailed,
+        AgreementNotFound,
+        AgreementNotPending,
+        AgreementAmountMismatch,
+        AgreementConsentRequired,
+        AgreementSessionOpen,
+        AgreementAlreadyPaid,
+        AgreementVariableAmountUnsupported,
+        SubscriptionsNotEnabled,
     ];
+
+    /// <summary>The idempotency codes, in the order the integration contract lists them.</summary>
+    public static IReadOnlyList<string> Idempotency { get; } =
+    [
+        IdempotencyKeyRequired,
+        DuplicateRequest,
+        AlreadyProcessed,
+        PriorAttemptFailed,
+        IdempotencyKeyReused,
+    ];
+
+    /// <summary>
+    /// The codes that mean "nothing was done, try again later with the SAME key", in the order the
+    /// integration contract lists them.
+    /// </summary>
+    public static IReadOnlyList<string> Transient { get; } = [MerchantApiUnavailable, PaymentProcessingUnavailable];
 
     /// <summary>
     /// The codes <see cref="DominaiteClient.CreateCheckoutSessionAsync"/> throws as a
@@ -395,6 +499,12 @@ public sealed class DominaiteStorefrontException : DominaiteException
 public static class ChargeErrorCodes
 {
     /// <summary>
+    /// HTTP 402: the issuer declined. Not an exception and not in <see cref="All"/>: the call
+    /// returns the charge with status <c>failed</c>.
+    /// </summary>
+    public const string ChargeDeclined = "CHARGE_DECLINED";
+
+    /// <summary>
     /// HTTP 409: the method is revoked, expired or retired; ask the customer for another card via
     /// a hosted session with SaveCard.
     /// </summary>
@@ -430,9 +540,55 @@ public static class ChargeErrorCodes
     /// <summary>HTTP 503: card payments are off right now; nothing was charged. Retry later with the SAME key.</summary>
     public const string PaymentProcessingUnavailable = "PAYMENT_PROCESSING_UNAVAILABLE";
 
+    /// <summary>HTTP 404: no stored payment method with this id under your account. Nothing was charged.</summary>
+    public const string PaymentMethodNotFound = "PAYMENT_METHOD_NOT_FOUND";
+
     /// <summary>
-    /// The whole vocabulary, in the order the canonical contract lists it. An unlisted code still
-    /// arrives as a <see cref="DominaiteChargeException"/>.
+    /// HTTP 409: another charge on this payment method, sent with a different key, still waits for
+    /// the provider's verdict. This request charged nothing. Not retryable until that charge ends.
+    /// </summary>
+    public const string ChargeInProgress = "CHARGE_IN_PROGRESS";
+
+    /// <summary>
+    /// HTTP 422: a card is only charged in the currency of the payment it was saved from. Nothing
+    /// was charged.
+    /// </summary>
+    public const string ChargeCurrencyMismatch = "CHARGE_CURRENCY_MISMATCH";
+
+    /// <summary>HTTP 404: the <c>agreementId</c> is not one of your agreements. Nothing was charged and the key is not used up.</summary>
+    public const string AgreementNotFound = "AGREEMENT_NOT_FOUND";
+
+    /// <summary>HTTP 422: the agreement is linked to a different payment method than the one in the path.</summary>
+    public const string AgreementMethodMismatch = "AGREEMENT_METHOD_MISMATCH";
+
+    /// <summary>HTTP 422: the agreement has no consent on record, so it cannot back a charge.</summary>
+    public const string AgreementConsentMissing = "AGREEMENT_CONSENT_MISSING";
+
+    /// <summary>HTTP 422: the agreement is in a different currency than the charge.</summary>
+    public const string AgreementCurrencyMismatch = "AGREEMENT_CURRENCY_MISMATCH";
+
+    /// <summary>HTTP 422: the agreement has a fixed amount and the charge is below it.</summary>
+    public const string AgreementAmountMismatch = "AGREEMENT_AMOUNT_MISMATCH";
+
+    /// <summary>HTTP 422: the amount is above what the customer agreed to under this agreement.</summary>
+    public const string ChargeAmountAboveAgreement = "CHARGE_AMOUNT_ABOVE_AGREEMENT";
+
+    /// <summary>HTTP 422: the agreement's current billing period already has its charge.</summary>
+    public const string AgreementPeriodAlreadyCharged = "AGREEMENT_PERIOD_ALREADY_CHARGED";
+
+    /// <summary>HTTP 422: the agreement billed its last period, or was cancelled before this period began.</summary>
+    public const string AgreementEnded = "AGREEMENT_ENDED";
+
+    /// <summary>HTTP 422: the agreement is not active yet or is still in its trial.</summary>
+    public const string AgreementNotStarted = "AGREEMENT_NOT_STARTED";
+
+    /// <summary>HTTP 422: the amount is above the most one charge may be in this currency.</summary>
+    public const string ChargeAmountAboveCap = "CHARGE_AMOUNT_ABOVE_CAP";
+
+    /// <summary>
+    /// The whole vocabulary. The first seven are in the order the canonical contract lists them;
+    /// the codes the charge route added later follow. An unlisted 4xx code still arrives as a
+    /// <see cref="DominaiteChargeException"/>.
     /// </summary>
     public static IReadOnlyList<string> All { get; } =
     [
@@ -443,6 +599,19 @@ public static class ChargeErrorCodes
         ChargeFailed,
         PaymentMethodChargesDisabled,
         PaymentProcessingUnavailable,
+        PaymentMethodNotFound,
+        ChargeInProgress,
+        ChargeCurrencyMismatch,
+        AgreementNotFound,
+        AgreementMethodMismatch,
+        AgreementConsentMissing,
+        AgreementCurrencyMismatch,
+        AgreementAmountMismatch,
+        ChargeAmountAboveAgreement,
+        AgreementPeriodAlreadyCharged,
+        AgreementEnded,
+        AgreementNotStarted,
+        ChargeAmountAboveCap,
     ];
 }
 
@@ -490,6 +659,15 @@ public sealed class DominaiteChargeException : DominaiteException
 
     /// <summary>The whole envelope exactly as received, for fields the typed surface does not model.</summary>
     public JsonElement RawResult { get; }
+
+    /// <summary>
+    /// True for <c>PAYMENT_PROCESSING_UNAVAILABLE</c> (card payments come back on their own) and
+    /// <c>DUPLICATE_REQUEST</c> (the first request with this key is still running): retry both with
+    /// the SAME key. False for the rest, <c>CHARGE_IN_PROGRESS</c> and <c>CHARGE_OUTCOME_UNKNOWN</c>
+    /// included.
+    /// </summary>
+    public override bool IsRetryable
+        => this.Code is ChargeErrorCodes.DuplicateRequest or ChargeErrorCodes.PaymentProcessingUnavailable;
 }
 
 /// <summary>
@@ -512,6 +690,164 @@ public static class RevokeErrorCodes
     /// arrives as a <see cref="DominaiteRevokeException"/>.
     /// </summary>
     public static IReadOnlyList<string> All { get; } = [UpstreamContractError, MerchantApiUnavailable];
+}
+
+/// <summary>
+/// The codes the plan and agreement routes answer with, in the order the integration contract
+/// lists them. A 4xx arrives as a <see cref="DominaiteApiException"/> with one of these on
+/// <see cref="DominaiteException.Code"/>; the 503 arrives as a retryable
+/// <see cref="DominaiteTransportException"/>.
+/// </summary>
+public static class SubscriptionErrorCodes
+{
+    /// <summary>HTTP 404: no plan with this id under your account. The <c>plan_</c> handle is case-sensitive.</summary>
+    public const string PlanNotFound = "PLAN_NOT_FOUND";
+
+    /// <summary>HTTP 409: the plan is archived; create the agreement from an active plan.</summary>
+    public const string PlanNotActive = "PLAN_NOT_ACTIVE";
+
+    /// <summary>HTTP 404: no agreement with this id under your account.</summary>
+    public const string AgreementNotFound = "AGREEMENT_NOT_FOUND";
+
+    /// <summary>HTTP 409 on cancel: the agreement already completed or failed. Cancelling a cancelled agreement succeeds.</summary>
+    public const string AgreementEnded = "AGREEMENT_ENDED";
+
+    /// <summary>HTTP 404: no stored payment method with the <c>storedPaymentMethodId</c> under your account.</summary>
+    public const string PaymentMethodNotFound = "PAYMENT_METHOD_NOT_FOUND";
+
+    /// <summary>HTTP 409: the stored payment method is revoked, expired or retired and cannot back an agreement.</summary>
+    public const string PaymentMethodNotActive = "PAYMENT_METHOD_NOT_ACTIVE";
+
+    /// <summary>HTTP 422: the stored payment method was saved from a payment in another currency than the plan's.</summary>
+    public const string PaymentMethodCurrencyMismatch = "PAYMENT_METHOD_CURRENCY_MISMATCH";
+
+    /// <summary>HTTP 422: <c>maxAmountPerPeriod</c> is below the plan's amount. Nothing was created.</summary>
+    public const string MaxAmountBelowPlanAmount = "MAX_AMOUNT_BELOW_PLAN_AMOUNT";
+
+    /// <summary>HTTP 422: the agreement names a stored payment method or a maximum amount but carries no consent.</summary>
+    public const string AgreementConsentRequired = "AGREEMENT_CONSENT_REQUIRED";
+
+    /// <summary>HTTP 422: the currency the stored payment method is pinned to cannot be established.</summary>
+    public const string PaymentMethodCurrencyUnknown = "PAYMENT_METHOD_CURRENCY_UNKNOWN";
+
+    /// <summary>HTTP 422: this key was first used for another plan or agreement. Use a fresh key.</summary>
+    public const string IdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED";
+
+    /// <summary>HTTP 503: the platform could not validate the request. Nothing was created; retry with the SAME key.</summary>
+    public const string MerchantApiUnavailable = "MERCHANT_API_UNAVAILABLE";
+
+    /// <summary>The whole vocabulary above.</summary>
+    public static IReadOnlyList<string> All { get; } =
+    [
+        PlanNotFound,
+        PlanNotActive,
+        AgreementNotFound,
+        AgreementEnded,
+        PaymentMethodNotFound,
+        PaymentMethodNotActive,
+        PaymentMethodCurrencyMismatch,
+        MaxAmountBelowPlanAmount,
+        AgreementConsentRequired,
+        PaymentMethodCurrencyUnknown,
+        IdempotencyKeyReused,
+        MerchantApiUnavailable,
+    ];
+}
+
+/// <summary>
+/// The codes the webhook endpoint routes answer with. A 4xx arrives as a
+/// <see cref="DominaiteApiException"/> with one of these on <see cref="DominaiteException.Code"/>;
+/// the 503 arrives as a retryable <see cref="DominaiteTransportException"/>.
+/// </summary>
+public static class WebhookEndpointErrorCodes
+{
+    /// <summary>
+    /// HTTP 404 on delete: the id is unknown, belongs to another account or was already deleted. A
+    /// delete retry after a lost answer gets this; treat it as done.
+    /// </summary>
+    public const string WebhookNotFound = "WEBHOOK_NOT_FOUND";
+
+    /// <summary>HTTP 409: your account already has the most active endpoints it may have.</summary>
+    public const string WebhookLimitReached = "WEBHOOK_LIMIT_REACHED";
+
+    /// <summary>
+    /// HTTP 409: this key registered an endpoint that still exists. Its id is in
+    /// <c>error.params.webhookId</c> of <see cref="DominaiteApiException.RawResult"/>.
+    /// </summary>
+    public const string WebhookAlreadyRegistered = "WEBHOOK_ALREADY_REGISTERED";
+
+    /// <summary>HTTP 400: the URL is not HTTPS on a public host.</summary>
+    public const string WebhookUrlRejected = "WEBHOOK_URL_REJECTED";
+
+    /// <summary>HTTP 422: this key was first used with a different body. Use a fresh key.</summary>
+    public const string IdempotencyKeyReused = "IDEMPOTENCY_KEY_REUSED";
+
+    /// <summary>HTTP 409: the first call with this key still runs. Retry shortly with the SAME key.</summary>
+    public const string DuplicateRequest = "DUPLICATE_REQUEST";
+
+    /// <summary>HTTP 503: the platform could not serve the call. Nothing was registered.</summary>
+    public const string MerchantApiUnavailable = "MERCHANT_API_UNAVAILABLE";
+
+    /// <summary>The whole vocabulary above.</summary>
+    public static IReadOnlyList<string> All { get; } =
+    [
+        WebhookNotFound,
+        WebhookLimitReached,
+        WebhookAlreadyRegistered,
+        WebhookUrlRejected,
+        IdempotencyKeyReused,
+        DuplicateRequest,
+        MerchantApiUnavailable,
+    ];
+}
+
+/// <summary>
+/// The validation codes. A rejected request answers HTTP 400 with <see cref="ValidationError"/>
+/// on <see cref="DominaiteException.Code"/>, and one entry per field in
+/// <c>error.validationErrors</c> of <see cref="DominaiteApiException.RawResult"/>, each with one of
+/// the <see cref="Fields"/> codes.
+/// </summary>
+public static class ValidationErrorCodes
+{
+    /// <summary>HTTP 400: one or more fields were refused; the field errors are in RawResult.</summary>
+    public const string ValidationError = "VALIDATION_ERROR";
+
+    /// <summary>Field code: the field is required.</summary>
+    public const string Required = "REQUIRED";
+
+    /// <summary>Field code: the value is below the minimum.</summary>
+    public const string MinValue = "MIN_VALUE";
+
+    /// <summary>Field code: the value is too long.</summary>
+    public const string MaxLength = "MAX_LENGTH";
+
+    /// <summary>Field code: the value does not have the expected format.</summary>
+    public const string InvalidFormat = "INVALID_FORMAT";
+
+    /// <summary>Field code: the value is not one of the allowed values.</summary>
+    public const string InvalidSelection = "INVALID_SELECTION";
+
+    /// <summary>Field code: the date is in the future.</summary>
+    public const string DateInFuture = "DATE_IN_FUTURE";
+
+    /// <summary>Field code: the value is not a valid email address.</summary>
+    public const string InvalidEmail = "INVALID_EMAIL";
+
+    /// <summary>Field code: the value is not a known currency.</summary>
+    public const string InvalidCurrency = "INVALID_CURRENCY";
+
+    /// <summary>The field codes, in the order the integration contract lists them.</summary>
+    public static IReadOnlyList<string> Fields { get; } =
+    [
+        Required,
+        MinValue,
+        MaxLength,
+        InvalidFormat,
+        InvalidSelection,
+        DateInFuture,
+        InvalidEmail,
+        InvalidCurrency,
+    ];
 }
 
 /// <summary>
