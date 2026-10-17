@@ -1978,9 +1978,14 @@ public sealed class DominaiteClient : IDisposable
         return trimmed;
     }
 
+    /// <summary>
+    /// A payment method id in the lowercase form the gateway signs, or a validation error. The
+    /// gateway signs the lowercase <c>pm_</c> id, so an id with uppercase hex would otherwise fail
+    /// with INVALID_SIGNATURE.
+    /// </summary>
     private static string NormalizePaymentMethodId(string paymentMethodId)
     {
-        var trimmed = paymentMethodId.Trim();
+        var trimmed = paymentMethodId.Trim().ToLowerInvariant();
         if (!IdSegmentPattern.IsMatch(trimmed))
         {
             throw new DominaiteValidationException(

@@ -97,6 +97,22 @@ public class PaymentMethodTests
         Assert.Equal(expected, sent.Header("X-Signature"));
     }
 
+    /// <summary>The gateway signs the lowercase pm_ id, so an uppercase id is sent and signed lowercase.</summary>
+    [Fact]
+    public async Task AnUppercasePaymentMethodIdIsSignedAndSentLowercase()
+    {
+        using var server = new MockServer(ChargeCreated(), Revoked());
+        using var client = ClientFor(server);
+
+        await client.ChargePaymentMethodAsync(PaymentMethodId.ToUpperInvariant(), Charge());
+        await client.RevokePaymentMethodAsync(" " + PaymentMethodId.ToUpperInvariant() + " ");
+
+        Assert.Equal($"/api{ChargePath}", server.Requests[0].Path);
+        AssertSignatureMatches(server.Requests[0], ChargePath, ChargeKey);
+        Assert.Equal($"/api{RevokePath}", server.Requests[1].Path);
+        AssertSignatureMatches(server.Requests[1], RevokePath, string.Empty);
+    }
+
     [Fact]
     public async Task SaveCardIsSentInTheSessionBodyAndNowhereElse()
     {
