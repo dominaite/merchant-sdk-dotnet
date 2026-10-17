@@ -732,7 +732,7 @@ public class ContractTests
     }
 
     [Fact]
-    public async Task TheChargeNotFoundExampleIsAnApiErrorWithItsCode()
+    public async Task TheChargeNotFoundExampleIsAChargeErrorWithItsCode()
     {
         var example = Endpoint("chargePaymentMethod").GetProperty("notFoundExample");
         Assert.Equal(404, example.GetProperty("httpStatus").GetInt32());
@@ -742,7 +742,7 @@ public class ContractTests
             using var server = new MockServer(Reply.Raw(404, body));
             using var client = ClientFor(server);
 
-            var error = await Assert.ThrowsAsync<DominaiteApiException>(
+            var error = await Assert.ThrowsAsync<DominaiteChargeException>(
                 () => client.ChargePaymentMethodAsync(PaymentMethodId, Charge()));
 
             Assert.Equal(404, error.HttpStatus);

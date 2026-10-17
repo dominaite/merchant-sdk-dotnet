@@ -414,19 +414,47 @@ public class PaymentMethodTests
         Assert.Equal(code, error.RawResult.GetProperty("error").GetProperty("code").GetString());
     }
 
-    [Fact]
-    public async Task AChargeAgainstAMethodThatIsNotYoursIsA404ApiError()
+    /// <summary>A coded 404 on the charge route names what is missing, so it is a charge outcome.</summary>
+    [Theory]
+    [InlineData(ChargeErrorCodes.PaymentMethodNotFound)]
+    [InlineData(ChargeErrorCodes.AgreementNotFound)]
+    public async Task AChargeAgainstSomethingThatIsNotYoursIsA404ChargeError(string code)
     {
-        using var server = new MockServer(Reply.ErrorEnvelope(404, "PAYMENT_METHOD_NOT_FOUND", "No stored payment method with this id."));
+        using var server = new MockServer(Reply.ErrorEnvelope(404, code, "Not found under your account."));
         using var client = ClientFor(server);
 
-        var error = await Assert.ThrowsAsync<DominaiteApiException>(
+        var error = await Assert.ThrowsAsync<DominaiteChargeException>(
             () => client.ChargePaymentMethodAsync(PaymentMethodId, Charge()));
 
         Assert.Equal(404, error.HttpStatus);
-        Assert.Equal("PAYMENT_METHOD_NOT_FOUND", error.Code);
+        Assert.Equal(code, error.Code);
         Assert.Equal(ChargeKey, error.IdempotencyKey);
+        Assert.Null(error.Charge);
         Assert.False(error.IsRetryable);
+    }
+
+    /// <summary>
+    /// A coded 5xx outside the route's vocabulary (the middleware's INTERNAL_ERROR) is a transport
+    /// failure that keeps its code, on the charge and on the revoke route alike.
+    /// </summary>
+    [Theory]
+    [InlineData(500, "INTERNAL_ERROR")]
+    [InlineData(503, "SERVICE_UNAVAILABLE")]
+    [InlineData(502, "A_NEW_CODE")]
+    public async Task AChargeOrRevoke5xxOutsideTheRouteVocabularyIsATransportErrorWithItsCode(int status, string code)
+    {
+        using var server = new MockServer(Reply.ErrorEnvelope(status, code, "An unexpected error occurred"), Reply.ErrorEnvelope(status, code, "An unexpected error occurred"));
+        using var client = ClientFor(server);
+
+        var charge = await Assert.ThrowsAsync<DominaiteTransportException>(
+            () => client.ChargePaymentMethodAsync(PaymentMethodId, Charge()));
+        var revoke = await Assert.ThrowsAsync<DominaiteTransportException>(
+            () => client.RevokePaymentMethodAsync(PaymentMethodId));
+
+        Assert.Equal((status, code), (charge.HttpStatus!.Value, charge.Code!));
+        Assert.Equal((status, code), (revoke.HttpStatus!.Value, revoke.Code!));
+        Assert.Equal(ChargeKey, charge.IdempotencyKey);
+        Assert.True(charge.IsRetryable);
     }
 
     /// <summary>A 400 with a code is input validation, not a charge outcome.</summary>
@@ -580,7 +608,6 @@ public class PaymentMethodTests
     [Theory]
     [InlineData(502, RevokeErrorCodes.UpstreamContractError, "The payment provider refused to delete the stored credential.")]
     [InlineData(503, RevokeErrorCodes.MerchantApiUnavailable, "The payment provider is unavailable. Nothing changed; retry later.")]
-    [InlineData(502, "A_NEW_CODE", "refused")]
     public async Task RevokeThrowsRevokeExceptionsForCodedFailures(int status, string code, string message)
     {
         using var server = new MockServer(Reply.ErrorEnvelope(status, code, message));

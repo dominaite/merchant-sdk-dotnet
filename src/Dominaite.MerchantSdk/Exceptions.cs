@@ -616,22 +616,24 @@ public static class ChargeErrorCodes
 }
 
 /// <summary>
-/// The gateway answered a charge with an error code instead of a charge result: HTTP 409, 422,
-/// 502 or 503. Branch on <see cref="DominaiteException.Code"/>; see <see cref="ChargeErrorCodes"/>.
+/// The gateway answered a charge with an error code instead of a charge result: HTTP 404, 409,
+/// 422, 502 or 503. Branch on <see cref="DominaiteException.Code"/>; see <see cref="ChargeErrorCodes"/>.
 /// </summary>
 /// <remarks>
 /// The one that matters most is <c>CHARGE_OUTCOME_UNKNOWN</c>: the provider gave no verdict and
 /// the charge MAY have happened. <see cref="Charge"/> is present, so poll
 /// <see cref="DominaiteClient.GetStatusAsync"/> with <see cref="TransactionId"/> or wait for the
 /// webhook. Never retry under a new key. A decline is NOT this exception: HTTP 402 returns a
-/// charge whose status is <c>failed</c>. A 404 for an id that is not yours is
-/// <see cref="DominaiteApiException"/> with code <c>PAYMENT_METHOD_NOT_FOUND</c>, and a 5xx that
-/// carries no gateway code (an HTML page from a proxy) is <see cref="DominaiteTransportException"/>.
+/// charge whose status is <c>failed</c>. A 404 for an id that is not yours IS this exception, with
+/// code <c>PAYMENT_METHOD_NOT_FOUND</c> (or <c>AGREEMENT_NOT_FOUND</c> for the agreement). A 400 is
+/// <see cref="DominaiteApiException"/>. A 5xx whose code is not in <see cref="ChargeErrorCodes"/>
+/// (an HTML page from a proxy, or a code such as <c>INTERNAL_ERROR</c>) is a
+/// <see cref="DominaiteTransportException"/> that keeps the code.
 /// </remarks>
 public sealed class DominaiteChargeException : DominaiteException
 {
     /// <summary>Initializes a new instance of the <see cref="DominaiteChargeException"/> class.</summary>
-    /// <param name="httpStatus">The HTTP status code: 409, 422, 502 or 503.</param>
+    /// <param name="httpStatus">The HTTP status code: 404, 409, 422, 502 or 503.</param>
     /// <param name="code">The machine-readable reason. See <see cref="ChargeErrorCodes"/>.</param>
     /// <param name="message">The human-readable reason from the API.</param>
     /// <param name="charge">The charge row the gateway attached to its answer, when it did.</param>
@@ -686,8 +688,8 @@ public static class RevokeErrorCodes
     public const string MerchantApiUnavailable = "MERCHANT_API_UNAVAILABLE";
 
     /// <summary>
-    /// The whole vocabulary, in the order the canonical contract lists it. An unlisted code still
-    /// arrives as a <see cref="DominaiteRevokeException"/>.
+    /// The whole vocabulary, in the order the canonical contract lists it. An unlisted 5xx code
+    /// arrives as a <see cref="DominaiteTransportException"/> that keeps the code.
     /// </summary>
     public static IReadOnlyList<string> All { get; } = [UpstreamContractError, MerchantApiUnavailable];
 }
@@ -851,9 +853,11 @@ public static class ValidationErrorCodes
 }
 
 /// <summary>
-/// The gateway refused to revoke a stored payment method: HTTP 502 or 503. Nothing changed either
-/// way; branch on <see cref="DominaiteException.Code"/>, see <see cref="RevokeErrorCodes"/>. An id
-/// that is not yours is still <see cref="DominaiteApiException"/> with HTTP 404.
+/// The gateway refused to revoke a stored payment method: HTTP 502 or 503 with one of the
+/// <see cref="RevokeErrorCodes"/>. Nothing changed either way; branch on
+/// <see cref="DominaiteException.Code"/>. An id that is not yours is still
+/// <see cref="DominaiteApiException"/> with HTTP 404, and a 5xx with any other code is a
+/// <see cref="DominaiteTransportException"/> that keeps the code.
 /// </summary>
 public sealed class DominaiteRevokeException : DominaiteException
 {

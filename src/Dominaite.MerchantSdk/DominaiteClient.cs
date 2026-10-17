@@ -453,7 +453,7 @@ public sealed class DominaiteClient : IDisposable
     /// <see cref="ChargeStatuses.Pending"/> is not terminal: poll
     /// <see cref="GetStatusAsync"/> with the charge's transaction id. What throws
     /// <see cref="DominaiteChargeException"/> is the gateway answering with a code instead of a
-    /// charge (409, 422, 502, 503); <c>CHARGE_OUTCOME_UNKNOWN</c> carries the charge row to poll
+    /// charge (404, 409, 422, 502, 503); <c>CHARGE_OUTCOME_UNKNOWN</c> carries the charge row to poll
     /// and must never be retried under a new key.
     /// </remarks>
     /// <param name="paymentMethodId">The <see cref="StoredPaymentMethod.Id"/> read off a paid session's status.</param>
@@ -464,12 +464,12 @@ public sealed class DominaiteClient : IDisposable
     /// <param name="cancellationToken">Cancels the call.</param>
     /// <returns>The charge result. Check <see cref="PaymentMethodCharge.IsPaid"/>.</returns>
     /// <exception cref="DominaiteValidationException">Bad arguments or a missing idempotency key; nothing was sent.</exception>
-    /// <exception cref="DominaiteChargeException">The gateway answered with an error code; inspect Code.</exception>
+    /// <exception cref="DominaiteChargeException">The gateway answered with an error code, including 404 PAYMENT_METHOD_NOT_FOUND for a method that is not yours; inspect Code.</exception>
     /// <exception cref="DominaiteAuthException">Wrong credentials, bad signature, clock off, IP not allowlisted.</exception>
     /// <exception cref="DominaitePermissionException">HTTP 403: the key does not have the scope this route needs.</exception>
     /// <exception cref="DominaiteRateLimitException">HTTP 429: wait, then retry with the same idempotency key.</exception>
-    /// <exception cref="DominaiteApiException">404 (PAYMENT_METHOD_NOT_FOUND) for a method that is not yours, a 400 validation rejection, or an unexpected response.</exception>
-    /// <exception cref="DominaiteTransportException">Network failure, or a 5xx without a gateway code; retry with the same key.</exception>
+    /// <exception cref="DominaiteApiException">A 400 validation rejection, or an unexpected response.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure, or a 5xx that is not a charge outcome (no code, or a code outside <see cref="ChargeErrorCodes"/>); retry with the same key.</exception>
     public async Task<PaymentMethodCharge> ChargePaymentMethodAsync(
         string paymentMethodId,
         ChargeRequest request,
@@ -507,7 +507,7 @@ public sealed class DominaiteClient : IDisposable
         if (reply.Status >= 400)
         {
             var code = reply.ErrorCode;
-            if (code is not null && !IsGenericFailureStatus(reply.Status))
+            if (code is not null && IsRouteOutcome(reply.Status, code, ChargeErrorCodes.All, notFoundIsOutcome: true))
             {
                 throw new DominaiteChargeException(
                     reply.Status,
@@ -548,7 +548,7 @@ public sealed class DominaiteClient : IDisposable
     /// <exception cref="DominaiteValidationException">The id is not one path segment; nothing was sent.</exception>
     /// <exception cref="DominaiteRevokeException">502 UPSTREAM_CONTRACT_ERROR or 503 MERCHANT_API_UNAVAILABLE; nothing changed.</exception>
     /// <exception cref="DominaiteApiException">HTTP 404 (VALIDATION_ERROR) for an unknown or foreign payment method id.</exception>
-    /// <exception cref="DominaiteTransportException">Network failure, or a 5xx without a gateway code.</exception>
+    /// <exception cref="DominaiteTransportException">Network failure, or a 5xx that is not a revoke outcome (no code, or a code outside <see cref="RevokeErrorCodes"/>).</exception>
     public async Task RevokePaymentMethodAsync(
         string paymentMethodId,
         CancellationToken cancellationToken = default)
@@ -568,7 +568,7 @@ public sealed class DominaiteClient : IDisposable
         }
 
         var code = reply.ErrorCode;
-        if (code is not null && !IsGenericFailureStatus(reply.Status))
+        if (code is not null && IsRouteOutcome(reply.Status, code, RevokeErrorCodes.All, notFoundIsOutcome: false))
         {
             throw new DominaiteRevokeException(
                 reply.Status,
@@ -1576,13 +1576,26 @@ public sealed class DominaiteClient : IDisposable
     }
 
     /// <summary>
-    /// The statuses that stay generic on every route: input validation and an id that is not
-    /// yours. A coded answer outside this set is the gateway describing a payment method outcome,
-    /// which the charge and revoke routes surface as <see cref="DominaiteChargeException"/> and
-    /// <see cref="DominaiteRevokeException"/>. Credentials (401), permissions (403) and limits (429)
-    /// never get here: <see cref="SendAsync"/> throws them first.
+    /// Whether a coded failure on the charge or revoke route is that route's own outcome, which it
+    /// surfaces as <see cref="DominaiteChargeException"/> or <see cref="DominaiteRevokeException"/>.
     /// </summary>
-    private static bool IsGenericFailureStatus(int status) => status is 400 or 404;
+    /// <remarks>
+    /// One rule for every route: a 400 is input validation and stays generic. A 404 is the route's
+    /// own outcome where its codes name the missing thing (the charge route's
+    /// <c>PAYMENT_METHOD_NOT_FOUND</c> and <c>AGREEMENT_NOT_FOUND</c>), and generic elsewhere. A
+    /// coded 5xx is the route's own outcome only when the code is in its vocabulary; any other 5xx
+    /// (a middleware <c>INTERNAL_ERROR</c>, say) is a retryable transport failure that keeps its
+    /// code. Credentials (401), permissions (403) and limits (429) never get here:
+    /// <see cref="SendAsync"/> throws them first.
+    /// </remarks>
+    private static bool IsRouteOutcome(int status, string code, IReadOnlyList<string> vocabulary, bool notFoundIsOutcome)
+        => status switch
+        {
+            400 => false,
+            404 => notFoundIsOutcome,
+            >= 500 => vocabulary.Contains(code, StringComparer.Ordinal),
+            _ => true,
+        };
 
     /// <summary>
     /// One parsed gateway answer: the HTTP status and the envelope as sent.
