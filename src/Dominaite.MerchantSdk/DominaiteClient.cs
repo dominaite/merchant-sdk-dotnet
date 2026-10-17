@@ -83,6 +83,17 @@ public sealed class DominaiteClient : IDisposable
     /// <summary>This SDK's version, reported in the User-Agent.</summary>
     public const string Version = "0.6.0";
 
+    /// <summary>The response header that tells an old SDK version to upgrade.</summary>
+    private const string NoticeHeader = "Dominaite-Sdk-Notice";
+
+    /// <summary>The response header support finds a call by.</summary>
+    private const string RequestIdHeader = "Dominaite-Request-Id";
+
+    private const int MaxNoticeLength = 512;
+    private const int MaxSeenNotices = 32;
+    private const int MaxRequestIdLength = 128;
+    private const long ClockSkewWarningSeconds = 60;
+
     private const string KeyIdPrefix = "dmk_";
     private const string SecretPrefix = "dms_";
 
@@ -114,6 +125,12 @@ public sealed class DominaiteClient : IDisposable
     private readonly string _secret;
     private readonly HttpClient _http;
     private readonly bool _ownsHttpClient;
+    private readonly Action<string> _onWarning;
+    private readonly Action<string>? _onDebug;
+
+    /// <summary>The notice values this client already warned about, so each warns once.</summary>
+    private readonly HashSet<string> _seenNotices = new(StringComparer.Ordinal);
+    private readonly object _noticeLock = new();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DominaiteClient"/> class.
@@ -161,6 +178,8 @@ public sealed class DominaiteClient : IDisposable
         this.BaseUrl = baseUrl;
 
         this.UserAgent = BuildUserAgent(options.UserAgentSuffix);
+        this._onWarning = options.OnWarning ?? (message => Trace.TraceWarning(message));
+        this._onDebug = options.OnDebug;
 
         if (options.HttpClient is not null)
         {
@@ -201,6 +220,13 @@ public sealed class DominaiteClient : IDisposable
 
         var ping = Deserialize<PingResponse>(payload, "ping");
         ping.Raw = payload;
+
+        if (ping.ClockSkewSeconds is > ClockSkewWarningSeconds or < -ClockSkewWarningSeconds)
+        {
+            this.Warn(
+                $"dominaite-dotnet: clock skew is {ping.ClockSkewSeconds} s; requests fail at 300 s. Sync this server's clock.");
+        }
+
         return ping;
     }
 
@@ -367,6 +393,9 @@ public sealed class DominaiteClient : IDisposable
                 lastError = error;
                 if (attempt + 1 < options.Attempts)
                 {
+                    this.Warn(
+                        $"dominaite-dotnet: retrying CreateCheckoutSessionWithRetryAsync after {RetryReason(error)} "
+                        + $"(attempt {attempt + 2} of {options.Attempts})");
                     var delay = options.BaseDelay * Math.Pow(2, Math.Min(attempt, 16));
                     await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
                 }
@@ -1190,6 +1219,32 @@ public sealed class DominaiteClient : IDisposable
             message.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
         }
 
+        var started = Stopwatch.GetTimestamp();
+        int? debugStatus = null;
+        string? requestId = null;
+        try
+        {
+            return await this.ExchangeAsync(message, cancellationToken, (status, id) =>
+            {
+                debugStatus = status;
+                requestId = id;
+            }).ConfigureAwait(false);
+        }
+        finally
+        {
+            this.WriteDebugLine(method.Method, path, debugStatus, started, requestId, idempotencyKey);
+        }
+    }
+
+    /// <summary>
+    /// Sends the signed message and reads the reply. <paramref name="answered"/> learns the status
+    /// and the request id as soon as a response arrives, for the debug line.
+    /// </summary>
+    private async Task<ApiReply> ExchangeAsync(
+        HttpRequestMessage message,
+        CancellationToken cancellationToken,
+        Action<int, string?> answered)
+    {
         HttpResponseMessage response;
         try
         {
@@ -1216,6 +1271,11 @@ public sealed class DominaiteClient : IDisposable
         using (response)
         {
             var status = (int)response.StatusCode;
+            answered(status, FirstHeader(response, RequestIdHeader));
+
+            // Read on every answer, errors included: an old SDK must hear it is old even when the
+            // call it made failed.
+            this.ReadNotice(FirstHeader(response, NoticeHeader));
 
             // A 3xx is not a protocol detail here, it is a red flag: the API never redirects, and
             // the handler did not follow it. Hard error, never retried.
@@ -1264,6 +1324,156 @@ public sealed class DominaiteClient : IDisposable
             return reply;
         }
     }
+
+    /// <summary>The first value of a response header, or null.</summary>
+    private static string? FirstHeader(HttpResponseMessage response, string name)
+        => response.Headers.TryGetValues(name, out var values) ? values.FirstOrDefault() : null;
+
+    /// <summary>
+    /// Warns once per distinct <c>Dominaite-Sdk-Notice</c> value. A missing header is a no-op, so
+    /// this SDK works the same against an API that does not send one yet.
+    /// </summary>
+    private void ReadNotice(string? header)
+    {
+        if (string.IsNullOrWhiteSpace(header))
+        {
+            return;
+        }
+
+        var value = Clean(header, MaxNoticeLength);
+        if (value.Length == 0)
+        {
+            return;
+        }
+
+        lock (this._noticeLock)
+        {
+            // Bounded, so an API that sends a fresh value every time cannot grow this forever.
+            if (this._seenNotices.Count >= MaxSeenNotices || !this._seenNotices.Add(value))
+            {
+                return;
+            }
+        }
+
+        this.Warn(NoticeMessage(value));
+    }
+
+    /// <summary>
+    /// The warning for a notice value such as
+    /// <c>deprecated; current="0.6.0"; sunset="2027-01-31"; info="https://..."</c>.
+    /// </summary>
+    private static string NoticeMessage(string value)
+    {
+        var parts = value.Split(';');
+        if (!string.Equals(parts[0].Trim(), "deprecated", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"dominaite-dotnet {Version}: {value}";
+        }
+
+        var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var part in parts.Skip(1))
+        {
+            var equals = part.IndexOf('=', StringComparison.Ordinal);
+            if (equals <= 0)
+            {
+                continue;
+            }
+
+            var field = part[..equals].Trim();
+            var text = part[(equals + 1)..].Trim();
+            if (text.Length >= 2 && text[0] == '"' && text[^1] == '"')
+            {
+                text = text[1..^1];
+            }
+
+            fields[field] = text.Trim();
+        }
+
+        var message = new StringBuilder($"dominaite-dotnet {Version} is deprecated");
+        if (fields.TryGetValue("current", out var current) && current.Length > 0)
+        {
+            message.Append("; upgrade to ").Append(current);
+        }
+
+        if (fields.TryGetValue("sunset", out var sunset) && sunset.Length > 0)
+        {
+            message.Append(" (sunset ").Append(sunset).Append(')');
+        }
+
+        message.Append('.');
+        if (fields.TryGetValue("info", out var info) && info.Length > 0)
+        {
+            message.Append(' ').Append(info);
+        }
+
+        return message.ToString();
+    }
+
+    /// <summary>
+    /// One line per request when <see cref="DominaiteClientOptions.OnDebug"/> is set: method, the
+    /// signed path, status, time, request id and idempotency key. Never a body, a query, the
+    /// secret or the signature.
+    /// </summary>
+    private void WriteDebugLine(string method, string path, int? status, long started, string? requestId, string idempotencyKey)
+    {
+        if (this._onDebug is null)
+        {
+            return;
+        }
+
+        var elapsed = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        var line = new StringBuilder("dominaite-dotnet: ")
+            .Append(method).Append(' ')
+            .Append(path).Append(' ')
+            .Append(status?.ToString(CultureInfo.InvariantCulture) ?? "error").Append(' ')
+            .Append(elapsed.ToString(CultureInfo.InvariantCulture)).Append("ms");
+
+        var id = requestId is null ? string.Empty : Clean(requestId, MaxRequestIdLength);
+        if (id.Length > 0)
+        {
+            line.Append(" request_id=").Append(id);
+        }
+
+        if (idempotencyKey.Length > 0)
+        {
+            line.Append(" idempotency_key=").Append(idempotencyKey);
+        }
+
+        Deliver(this._onDebug, line.ToString());
+    }
+
+    /// <summary>Hands a message to the warning sink.</summary>
+    private void Warn(string message) => Deliver(this._onWarning, message);
+
+    /// <summary>
+    /// Calls a sink and drops whatever it throws: a broken log sink must never fail a payment call.
+    /// </summary>
+    private static void Deliver(Action<string> sink, string message)
+    {
+        try
+        {
+            sink(message);
+        }
+#pragma warning disable CA1031 // A log sink's own failure is not the caller's request failing.
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            // Dropped on purpose.
+        }
+    }
+
+    /// <summary>Cuts a header value to <paramref name="max"/> characters and removes control characters.</summary>
+    private static string Clean(string value, int max)
+    {
+        var cut = value.Length > max ? value[..max] : value;
+        return new string(cut.Where(c => !char.IsControl(c)).ToArray()).Trim();
+    }
+
+    /// <summary>Why a retry happens: the error code, else the HTTP status, else the error type.</summary>
+    private static string RetryReason(DominaiteException error)
+        => error.Code
+            ?? error.HttpStatus?.ToString(CultureInfo.InvariantCulture)
+            ?? error.GetType().Name;
 
     /// <summary>
     /// <c>dominaite-dotnet/&lt;version&gt; (dotnet &lt;runtime version&gt;)</c>, then the caller's suffix.

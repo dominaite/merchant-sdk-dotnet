@@ -36,6 +36,29 @@ public sealed class DominaiteClientOptions
     public string? UserAgentSuffix { get; set; }
 
     /// <summary>
+    /// Where the SDK sends its warnings: a <c>Dominaite-Sdk-Notice</c> from the API (an old SDK
+    /// version, once per distinct notice), a retry in
+    /// <see cref="DominaiteClient.CreateCheckoutSessionWithRetryAsync"/>, and a ping clock skew
+    /// over 60 seconds. Defaults to <see cref="System.Diagnostics.Trace.TraceWarning(string)"/>.
+    /// </summary>
+    /// <remarks>
+    /// A warning never holds the secret, a signature, a cashier token or a request or response
+    /// body. Whatever the callback throws is dropped, so it cannot fail the call.
+    /// </remarks>
+    public Action<string>? OnWarning { get; set; }
+
+    /// <summary>
+    /// Turns on the debug log: one line per request with the method, the signed path, the status,
+    /// the time in milliseconds, the <c>Dominaite-Request-Id</c> response header and the
+    /// idempotency key. Off when null, the default.
+    /// </summary>
+    /// <remarks>
+    /// A debug line never holds the secret, a signature, a cashier token, a query string or a
+    /// request or response body. Whatever the callback throws is dropped.
+    /// </remarks>
+    public Action<string>? OnDebug { get; set; }
+
+    /// <summary>
     /// Your own <see cref="System.Net.Http.HttpClient"/>, for a proxy-aware transport or a
     /// factory-managed one. The SDK will not dispose it, and it overrides
     /// <see cref="Timeout"/>.
