@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0
+
+### Breaking
+
+- The base URL is required. The client no longer falls back to production when you leave it
+  out, so an unset environment variable cannot send sandbox credentials to production.
+  Construction fails with `DominaiteValidationException` when the base URL is missing, empty or
+  whitespace. Pass `DominaiteClient.SandboxBaseUrl` (`https://api.staging.dominaite.com/payments`)
+  or `DominaiteClient.ProductionBaseUrl` (`https://api.dominaite.com/payments`), or your own
+  value.
+- `DominaiteClient.DefaultBaseUrl` is removed. Use `DominaiteClient.ProductionBaseUrl`.
+- The base URL must use `https://`. Plain `http://` is accepted only for localhost, 127.0.0.1
+  and ::1, so a local mock server still works. Anything else fails construction with
+  `DominaiteValidationException`.
+
 ## 0.5.2
 
 ### Added
