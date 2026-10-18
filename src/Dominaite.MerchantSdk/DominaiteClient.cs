@@ -81,7 +81,7 @@ public sealed class DominaiteClient : IDisposable
     public const string TransactionsPath = "/merchant-api/transactions";
 
     /// <summary>This SDK's version, reported in the User-Agent.</summary>
-    public const string Version = "0.6.0";
+    public const string Version = "0.7.0";
 
     /// <summary>The response header that tells an old SDK version to upgrade.</summary>
     private const string NoticeHeader = "Dominaite-Sdk-Notice";
